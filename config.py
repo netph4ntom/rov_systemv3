@@ -4,12 +4,12 @@
 # ──────────────────────────────────────────────
 # KAMERA
 # ──────────────────────────────────────────────
-CAMERA_FRONT_INDEX   = 1          # index /dev/videoX untuk kamera depan
-CAMERA_BOTTOM_INDEX  = 0          # index /dev/videoX untuk kamera bawah
+CAMERA_FRONT_INDEX   = 0          # index /dev/videoX untuk kamera depan
+CAMERA_BOTTOM_INDEX  = 1          # index /dev/videoX untuk kamera bawah
 
 FRAME_WIDTH   = 640
 FRAME_HEIGHT  = 480
-FRAME_FPS     = 30
+FRAME_FPS     = 20
 
 MJPEG_QUALITY = 80                # kualitas JPEG 1–100 (makin kecil makin ringan)
 
@@ -30,8 +30,8 @@ CLAHE_TILE_SIZE  = (8, 8)     # tile 8x8 cocok untuk resolusi 640x480
 # ------------------------------------------------
 # IMAGE PROCESSING
 # ------------------------------------------------
-SCREENSHOT_DIR  = r"D:\PROJECT ROV\rov_system\storage\screenshots"
-RECORD_DIR      = r"D:\PROJECT ROV\rov_system\storage\recordings"
+SCREENSHOT_DIR  = "storage/screenshots"
+RECORD_DIR      = "storage/recordings"
 
 SCREENSHOT_QUALITY = 95
 
