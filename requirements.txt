@@ -1,0 +1,26 @@
+# requirements.txt — Project ROV Vision
+# Install: pip install -r requirements.txt
+
+# ── Computer Vision ────────────────────────────
+opencv-python>=4.8.0        # kamera, image processing, MJPEG encode
+numpy>=1.24.0               # array operasi
+pyzbar                      # QR code / barcode scanner
+
+# ── Web Server / API ───────────────────────────
+flask>=3.0.0                # REST API + MJPEG server
+flask-socketio>=5.3.6       # WebSocket (SocketIO) untuk push ke React
+flask-cors>=4.0.0           # Cross-Origin Resource Sharing untuk React dev server
+python-socketio>=5.10.0     # SocketIO backend
+python-engineio>=4.9.0      # Engine.IO transport layer
+
+# ── Async / Networking ─────────────────────────
+eventlet>=0.35.0            # async mode untuk flask-socketio (alternatif: gevent)
+
+# ── Utilities ─────────────────────────────────
+pymavlink>=2.4.40              # MAVLink komunikasi dengan UART
+
+# ── Utilities ─────────────────────────────────
+python-dotenv>=1.0.0        # load .env file (opsional, untuk konfigurasi via env var)
+
+# ── WebRTC ─────────────────────────────────────
+aiortc>=1.6.0               # WebRTC streaming

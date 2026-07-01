@@ -1,0 +1,28 @@
+# Virtual Environment
+.venv/
+venv/
+env/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# VSCode
+.vscode/
+
+# Log
+logs/
+*.log
+
+# Screenshot & Record
+storage/screenshots/
+storage/recordings/
+
+# Environment
+.env
+
+# OS
+.DS_Store
+Thumbs.db
