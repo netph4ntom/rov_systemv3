@@ -64,17 +64,22 @@ class BottomImageProcessor:
     # ──────────────────────────────────────────
     def preprocess_for_qr(self, frame: np.ndarray) -> np.ndarray:
         """
-        Kembalikan versi grayscale + threshold frame untuk pyzbar / ZXing.
+        Kembalikan versi grayscale + CLAHE + Gaussian Blur untuk mempermudah deteksi QR code oleh pyzbar.
         Dipanggil oleh qr_detector.py, BUKAN dipakai untuk stream.
         """
+        from config import CLAHE_CLIP_LIMIT, CLAHE_TILE_SIZE
+        
+        # 1. Grayscale
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        # Adaptive threshold: lebih kuat melawan variasi pencahayaan
-        thresh = cv2.adaptiveThreshold(
-            gray, 255,
-            cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-            cv2.THRESH_BINARY, 11, 2
-        )
-        return thresh
+        
+        # 2. CLAHE (Contrast Limited Adaptive Histogram Equalization) untuk mengatasi low-contrast/pencahayaan tidak rata
+        clahe = cv2.createCLAHE(clipLimit=CLAHE_CLIP_LIMIT, tileGridSize=CLAHE_TILE_SIZE)
+        enhanced = clahe.apply(gray)
+        
+        # 3. Gaussian Blur tipis untuk mengurangi noise/turbulensi air (high frequency noise)
+        blurred = cv2.GaussianBlur(enhanced, (3, 3), 0)
+        
+        return blurred
 
     # ──────────────────────────────────────────
     # Drawing helpers

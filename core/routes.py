@@ -254,4 +254,4 @@ def run_core_server(
     start_queue_drainer(qr_result_queue, dock_event_queue, result_camera_queue)
 
     logger.info(f"[CoreAPI] Server berjalan di port {PORT_CORE_API}")
-    sio.run(app, host="0.0.0.0", port=PORT_CORE_API, use_reloader=False, log_output=True)
+    sio.run(app, host="0.0.0.0", port=PORT_CORE_API, use_reloader=False, log_output=True, allow_unsafe_werkzeug=True)
