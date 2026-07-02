@@ -12,33 +12,36 @@ Sistem dirancang dengan arsitektur **Multiprocessing** berbasis Python untuk mem
 
 ```mermaid
 graph TD
-    subgraph Operator Dashboard [Operator Dashboard - GCS]
-        React["React App (Dashboard & Control)"]
+
+    subgraph "Operator Dashboard - GCS"
+        React["React App - Dashboard and Control"]
     end
 
-    subgraph CoreAPI [Proses 1: CoreAPI - Port 8000]
-        Routes["Flask REST & Socket.IO Handler"]
-        MAVLink["MAVLinkBridge (Serial/UDP link)"]
+    subgraph "Process 1 - CoreAPI (Port 8000)"
+        Routes["Flask REST and Socket.IO Handler"]
+        MAVLink["MAVLinkBridge - Serial or UDP Link"]
         Telemetry["TelemetryManager"]
         Trajectory["TrajectoryEstimator"]
-        Watchdog["FailsafeWatchdog (Watchdog L1)"]
+        Watchdog["FailsafeWatchdog - Watchdog L1"]
         Logger["Centralized Logger"]
     end
 
-    subgraph CameraFront [Proses 2: CameraFront - Port 8001]
+    subgraph "Process 2 - CameraFront (Port 8001)"
         FrontStream["Flask Stream Server"]
-        FrontCap["Capture Loop & Preprocessing (CLAHE)"]
-        FrontRec["FrontRecorder (Video Writer)"]
+        FrontCap["Capture Loop and Preprocessing - CLAHE"]
+        FrontRec["FrontRecorder - Video Writer"]
     end
 
-    subgraph CameraBottom [Proses 3: CameraBottom - Port 8002]
+    subgraph "Process 3 - CameraBottom (Port 8002)"
         BottomStream["Flask Stream Server"]
-        BottomCap["Capture Loop & Preprocessing"]
-        QRDet["QRDetector (Docking Alignment)"]
-        BottomRec["BottomRecorder (Video Writer)"]
+        BottomCap["Capture Loop and Preprocessing"]
+        QRDet["QRDetector - Docking Alignment"]
+        BottomRec["BottomRecorder - Video Writer"]
     end
 
-    %% IPC (Inter-Process Communication) Queues
+    Pixhawk["Pixhawk Flight Controller - ArduSub"]
+
+    %% IPC Queues
     Routes -->|cmd_front queue| FrontCap
     Routes -->|cmd_bottom queue| BottomCap
     FrontCap -->|result_camera queue| Routes
@@ -46,16 +49,28 @@ graph TD
     BottomCap -->|qr_result queue| Routes
     BottomCap -->|dock_event queue| Routes
 
-    %% Data Flow Internal
-    MAVLink -->|ATTITUDE, SYS_STATUS, etc.| Telemetry
+    %% Internal Data Flow
+    MAVLink -->|ATTITUDE SYS_STATUS etc| Telemetry
     Telemetry -->|on_telemetry_update| Trajectory
     Trajectory -->|on_trajectory_update| Routes
-    Routes <-->|Socket.IO & REST| React
-    MAVLink <-->|MAVLink Protocol (UDP/Serial)| Pixhawk["Pixhawk Flight Controller (ArduSub)"]
+    Routes <-->|Socket.IO and REST| React
+    MAVLink <-->|MAVLink over UDP or Serial| Pixhawk
 
-    style CoreAPI fill:#f9f,stroke:#333,stroke-width:2px
-    style CameraFront fill:#bbf,stroke:#333,stroke-width:2px
-    style CameraBottom fill:#bfb,stroke:#333,stroke-width:2px
+    style Routes fill:#FFE599
+    style MAVLink fill:#FFE599
+    style Telemetry fill:#FFE599
+    style Trajectory fill:#FFE599
+    style Watchdog fill:#FFE599
+    style Logger fill:#FFE599
+
+    style FrontStream fill:#B4C7E7
+    style FrontCap fill:#B4C7E7
+    style FrontRec fill:#B4C7E7
+
+    style BottomStream fill:#C6E0B4
+    style BottomCap fill:#C6E0B4
+    style QRDet fill:#C6E0B4
+    style BottomRec fill:#C6E0B4
 ```
 
 ### 1.2. Pembagian Peran Komponen
