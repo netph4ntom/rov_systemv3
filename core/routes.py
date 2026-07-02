@@ -267,8 +267,10 @@ def create_app(
         global _active_clients
         with _clients_lock:
             _active_clients = max(0, _active_clients - 1)
-        if _fs:
-            _fs.notify_dashboard_disconnected()
+        # Catatan: tidak ada notify_dashboard_disconnected() di FailsafeWatchdog.
+        # Failsafe mendeteksi timeout dashboard secara mandiri via _check_dashboard()
+        # menggunakan _last_dashboard_seen timestamp, sehingga tidak perlu
+        # dipanggil secara eksplisit saat disconnect.
         if _traj: _traj.update_velocity(0.0, 0.0)
 
     return app, sio
@@ -314,7 +316,7 @@ def run_core_server(
             logger.warning("[CoreAPI] MAVLink tidak terhubung")
     threading.Thread(target=_connect_bg, daemon=True, name="MAVLinkConnector").start()
 
-    app, sio = create_app(mav, tele, traj, fs, cmd_front_queue, cmd_bottom_queue)
+    app, sio = create_app(mav, tele, traj, cmd_front_queue, cmd_bottom_queue, fs)
     
     # Inject sio nyata ke proxy setelah create_app
     _sio_proxy.append(sio)
