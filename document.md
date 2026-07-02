@@ -1,40 +1,44 @@
-# Dokumentasi Sistem ROV Vision
+# Dokumentasi Sistem ROV Vision & Control
 
-Dokumen ini berisi analisis mendalam tentang arsitektur kode, alur data (system flow), dokumentasi lengkap untuk REST API & Socket.IO, serta rekomendasi perbaikan teknis untuk sistem kontrol dan visi ROV.
+Dokumen ini ditujukan sebagai panduan teknis komprehensif bagi **Dosen Pembimbing**, **Divisi Elektronik**, **Embedded System Engineer**, **Frontend Engineer**, serta **Pengembang Penerus** sistem ROV. Dokumen ini menyajikan analisis mendalam tentang arsitektur perangkat lunak, spesifikasi hardware & protokol komunikasi, alur kerja sistem (*data flow*), detail antarmuka REST API & Socket.IO, sistem keamanan (*failsafe*), serta layanan logging terpusat.
 
 ---
 
-## 1. Arsitektur & Analisis Kode Sistem
+## 1. Arsitektur Perangkat Lunak (Software Architecture)
 
-Sistem ini dirancang menggunakan arsitektur **Multiprocessing** di Python untuk memisahkan beban kerja pemrosesan video berkecepatan tinggi dari penanganan API dan komunikasi MAVLink. Hal ini dilakukan agar latensi frame video tetap rendah dan tidak mengganggu stabilitas kontrol wahana (ROV).
+Sistem dirancang dengan arsitektur **Multiprocessing** berbasis Python untuk memisahkan proses-proses kritis. Pemisahan ini mencegah latensi pemrosesan video berkecepatan tinggi mempengaruhi stabilitas kontrol wahana (ROV) dan pengiriman perintah MAVLink.
+
+### 1.1. Diagram Blok Arsitektur Sistem
 
 ```mermaid
 graph TD
-    subgraph Frontend
-        React["React App (Dashboard)"]
+    subgraph Operator Dashboard [Operator Dashboard - GCS]
+        React["React App (Dashboard & Control)"]
     end
 
-    subgraph CoreProcess ["Proses 1: CoreAPI (Port 8000)"]
-        Routes["Flask + Flask-SocketIO"]
-        MAVLink["MAVLinkBridge"]
+    subgraph CoreAPI [Proses 1: CoreAPI - Port 8000]
+        Routes["Flask REST & Socket.IO Handler"]
+        MAVLink["MAVLinkBridge (Serial/UDP link)"]
         Telemetry["TelemetryManager"]
         Trajectory["TrajectoryEstimator"]
+        Watchdog["FailsafeWatchdog (Watchdog L1)"]
+        Logger["Centralized Logger"]
     end
 
-    subgraph FrontCamProcess ["Proses 2: CameraFront (Port 8001)"]
+    subgraph CameraFront [Proses 2: CameraFront - Port 8001]
         FrontStream["Flask Stream Server"]
-        FrontCap["Capture Loop & Processor"]
-        FrontRec["FrontRecorder"]
+        FrontCap["Capture Loop & Preprocessing (CLAHE)"]
+        FrontRec["FrontRecorder (Video Writer)"]
     end
 
-    subgraph BottomCamProcess ["Proses 3: CameraBottom (Port 8002)"]
+    subgraph CameraBottom [Proses 3: CameraBottom - Port 8002]
         BottomStream["Flask Stream Server"]
-        BottomCap["Capture Loop & Processor"]
-        QRDet["QRDetector & Docking Logic"]
-        BottomRec["BottomRecorder"]
+        BottomCap["Capture Loop & Preprocessing"]
+        QRDet["QRDetector (Docking Alignment)"]
+        BottomRec["BottomRecorder (Video Writer)"]
     end
 
-    %% IPC Queues
+    %% IPC (Inter-Process Communication) Queues
     Routes -->|cmd_front queue| FrontCap
     Routes -->|cmd_bottom queue| BottomCap
     FrontCap -->|result_camera queue| Routes
@@ -42,268 +46,213 @@ graph TD
     BottomCap -->|qr_result queue| Routes
     BottomCap -->|dock_event queue| Routes
 
-    %% In-Process Connections
-    MAVLink -->|handle_message| Telemetry
+    %% Data Flow Internal
+    MAVLink -->|ATTITUDE, SYS_STATUS, etc.| Telemetry
     Telemetry -->|on_telemetry_update| Trajectory
     Trajectory -->|on_trajectory_update| Routes
     Routes <-->|Socket.IO & REST| React
-    MAVLink <-->|Serial / UDP| Pixhawk["Pixhawk Autopilot / SITL"]
+    MAVLink <-->|MAVLink Protocol (UDP/Serial)| Pixhawk["Pixhawk Flight Controller (ArduSub)"]
 
-    style CoreProcess fill:#f9f,stroke:#333,stroke-width:2px
-    style FrontCamProcess fill:#bbf,stroke:#333,stroke-width:2px
-    style BottomCamProcess fill:#bfb,stroke:#333,stroke-width:2px
+    style CoreAPI fill:#f9f,stroke:#333,stroke-width:2px
+    style CameraFront fill:#bbf,stroke:#333,stroke-width:2px
+    style CameraBottom fill:#bfb,stroke:#333,stroke-width:2px
 ```
 
-### 1.1. Komponen Utama
-Sistem terdiri dari tiga proses mandiri yang dieksekusi dari [main.py](file:///d:/PROJECT%20ROV/rov_system/main.py):
+### 1.2. Pembagian Peran Komponen
 
-1. **`CoreAPI` (Port 8000)**:
-   - Menangani komunikasi web untuk frontend menggunakan **Flask** (untuk HTTP REST API) dan **Flask-SocketIO** (untuk WebSocket real-time).
-   - Menjalankan **`MAVLinkBridge`** dalam background thread untuk bertukar data telemetry dan mengirimkan perintah override kontrol (armed, disarmed, flight mode, gripper, lights, RC override) ke Pixhawk/SITL.
-   - Menjalankan **`TelemetryManager`** untuk mem-parsing pesan MAVLink mentah menjadi representasi state ROV (pitch, roll, yaw, battery, depth).
-   - Menjalankan **`TrajectoryEstimator`** yang mengintegrasikan velocity joystick (dead reckoning) dengan orientasi yaw untuk mengestimasi lintasan koordinat 2D (X, Y) serta kedalaman (depth) ROV secara real-time.
-   - Menjalankan **`QueueDrainer`** (tiga thread background) untuk membaca data hasil deteksi QR, event docking, dan status kamera secara non-blocking dari IPC queue.
+#### 1. Proses CoreAPI (`main.py` -> `run_core_server`)
+Proses utama yang mengendalikan siklus hidup ROV dan jembatan ke operator:
+- **Flask & Socket.IO**: Melayani permintaan HTTP REST dan komunikasi dupleks penuh (*full-duplex*) berlatensi rendah ke dashboard operator React.
+- **`MAVLinkBridge`**: Beroperasi di thread latar belakang untuk menjalin koneksi serial/UDP ke Pixhawk. Mengirimkan sinyal kendali seperti override RC channel (motor), arm/disarm, mode terbang, servo gripper, dan relay lampu.
+- **`TelemetryManager`**: Memilah (*parse*) frame pesan biner MAVLink (seperti `ATTITUDE`, `SYS_STATUS`, `BATTERY_STATUS`, `SCALED_PRESSURE2`, `HEARTBEAT`) menjadi state dictionary Python yang siap dikonsumsi UI.
+- **`TrajectoryEstimator`**: Melakukan perhitungan posisi estimasi (*dead reckoning*) berbasis integrasi matematika kecepatan masukan joystick ($\Delta x, \Delta y$) terhadap orientasi yaw kompas Pixhawk dan pembacaan sensor kedalaman (*depth*).
+- **`FailsafeWatchdog`**: Mengawasi kesehatan operasional seluruh modul (watchdog level Pi) dan mengeksekusi mitigasi bencana/kegagalan sistem secara otonom.
 
-2. **`CameraFront` (Port 8001)**:
-   - Mengambil frame dari kamera depan (`CAMERA_FRONT_INDEX`).
-   - Melakukan koreksi warna ringan (boosting warna merah, mereduksi warna biru) dan peningkatan kontras menggunakan metode **CLAHE** (Contrast Limited Adaptive Histogram Equalization) yang telah dioptimalkan untuk kondisi kolam dangkal (1 meter).
-   - Menyediakan MJPEG stream melalui HTTP endpoint `/stream`.
-   - Mengonsumsi queue perintah screenshot dan perekaman video (`cmd_front`).
+#### 2. Proses CameraFront (`main.py` -> `run_front_stream_server`)
+- Mengambil bingkai gambar (*frame*) dari sensor kamera depan.
+- Menerapkan manipulasi gambar real-time: CLAHE (*Contrast Limited Adaptive Histogram Equalization*) dan koreksi warna (*boosting* warna merah, reduksi warna biru) untuk menembus keterbatasan jarak pandang kolam.
+- Menyajikan aliran video (*video stream*) berbasis protokol MJPEG.
+- Memproses antrean perintah screenshot dan perekaman video (`cmd_front`).
 
-3. **`CameraBottom` (Port 8002)**:
-   - Mengambil frame dari kamera bawah (`CAMERA_BOTTOM_INDEX`).
-   - Mengaktifkan auto-exposure agar gambar adaptif saat mendekati marker dock.
-   - Menjalankan **`QRDetector`** menggunakan `pyzbar` secara berkala (dibatasi interval waktu agar menghemat CPU) untuk mendeteksi QR code dan memeriksa apakah ROV sudah ter-align sempurna di atas docking station (pusat QR berada di dalam batas toleransi pusat frame).
-   - Menyediakan MJPEG stream dengan HUD penanda docking dan bounding box QR code.
-   - Mengonsumsi queue perintah screenshot dan perekaman video (`cmd_bottom`).
+#### 3. Proses CameraBottom (`main.py` -> `run_bottom_stream_server`)
+- Mengambil frame dari sensor kamera bawah.
+- Menerapkan auto-exposure dinamik agar marker target tidak mengalami *over-exposure* akibat paparan lampu.
+- Menjalankan **`QRDetector`** (`pyzbar`) secara berkala untuk mendeteksi QR code dan menghitung deviasi jarak titik pusat QR terhadap pusat frame kamera guna menentukan tingkat kelurusan (*docking alignment*).
+- Menyediakan MJPEG stream lengkap dengan HUD overlay status alignment dan bounding box QR code.
 
 ---
 
-## 2. Alur Kerja Sistem (System Flow)
+## 2. Alur Kerja Sistem (System Data Flow)
 
-### 2.1. Alur Inisialisasi & Startup
-1. Operator menjalankan `python main.py`.
-2. `main.py` menggunakan start method `spawn` (untuk keamanan multiprocessing pada pustaka OpenCV/Flask) dan menginisialisasi shared queue penampung IPC (Inter-Process Communication) menggunakan `multiprocessing.Manager()`.
-3. Tiga proses anak (`CoreAPI`, `CameraFront`, `CameraBottom`) di-spawn.
-4. Di dalam `CoreAPI`:
-   - `MAVLinkBridge` diluncurkan dalam thread background terpisah (`MAVLinkConnector`) untuk menyambungkan koneksi UDP/Serial ke autopilot secara asinkron agar tidak menahan jalannya inisialisasi server Flask.
-   - Thread `QueueDrainer` dimulai untuk secara konstan membaca queue asinkron (`qr_result`, `dock_event`, `result_camera`).
-   - Server WebSocket Socket.IO dijalankan di port 8000.
-5. Di dalam proses kamera (`CameraFront` & `CameraBottom`):
-   - OpenCV membuka antarmuka kamera hardware, mengonfigurasi resolusi dan FPS.
-   - Background thread capture loop diluncurkan untuk memproses frame video secara real-time dan merespons antrean perintah (`cmd_front` & `cmd_bottom`).
-   - Server Flask mini dijalankan pada masing-masing port (8001 dan 8002) untuk menyajikan MJPEG stream.
+### 2.1. Alur Startup & Inisialisasi Proses
+1. Script `main.py` dieksekusi -> start method diset ke `spawn`.
+2. Shared queue IPC dibuat oleh `multiprocessing.Manager()`.
+3. Logging terpusat (`setup_logging()`) menginisialisasi folder log dan banner awal.
+4. Tiga sub-proses (`CoreAPI`, `CameraFront`, `CameraBottom`) dijalankan secara independen.
+5. `CoreAPI` meluncurkan thread `MAVLinkConnector` untuk mendeteksi Pixhawk via UDP/Serial secara non-blocking, serta menjalankan thread penarik antrean (*Queue Drainer*) untuk memindahkan pesan IPC dari proses kamera ke Socket.IO.
 
-### 2.2. Alur Telemetry & Estimasi Trajectory
+### 2.2. Alur Keamanan: Watchdog & Failsafe (`failsafe.py`)
+Modul ini bertindak sebagai asuransi keamanan hardware ROV dengan sistem deteksi dua lapis (Raspberry Pi Watchdog & Pixhawk Failsafe).
+
+#### Subsistem yang Diawasi & Threshold Kegagalan:
+- **MAVLink**: Heartbeat Pixhawk terputus lebih dari `FS_MAVLINK_TIMEOUT` (5.0 detik).
+- **Dashboard**: Kehilangan koneksi WebSocket React client lebih dari `FS_DASHBOARD_TIMEOUT` (30.0 detik).
+- **Telemetry**: Data telemetri membeku / stale lebih dari `FS_TELEMETRY_TIMEOUT` (5.0 detik).
+- **Camera Front & Bottom**: Kamera tidak merespons HTTP request health check (timeout 2 detik).
+- **System**: Penggunaan CPU > 85%, RAM > 85%, atau Suhu CPU > 70°C.
+
+#### Skema Severity & Tindakan Proteksi:
+1. **INFO (0)**: Kondisi normal.
+2. **WARNING (1)**: Terjadi anomali ringan. Sistem mencoba melakukan pemulihan otomatis (*auto-recovery*), misalnya melakukan re-koneksi MAVLink di background thread.
+3. **CRITICAL (2)**: Auto-recovery gagal setelah batas maksimal percobaan (`FS_MAX_RECOVERY_ATTEMPTS = 3`). Sistem memaksa input joystick ke posisi netral (`PWM 1500`) dan memindahkan mode terbang Pixhawk ke **MANUAL** agar ROV mengapung/diam di tempat.
+4. **EMERGENCY (3)**: Dipicu oleh operator secara manual (tombol E-Stop) atau terjadi multi-kegagalan CRITICAL. Sistem mengirim perintah **DISARM** langsung ke Pixhawk, memaksa motor mati seketika, dan memancarkan status alarm merah ke dashboard.
+
+```mermaid
+flowchart TD
+    Start[Watchdog Loop: Setiap 2 Detik] --> CheckMav[Cek MAVLink Heartbeat]
+    CheckMav --> CheckDash[Cek Koneksi Dashboard]
+    CheckDash --> CheckCam[Cek Health Kamera via HTTP]
+    CheckCam --> CheckSys[Cek Resource CPU/RAM/Suhu]
+    
+    CheckSys --> Analisis{Ada Fault?}
+    Analisis -- Tidak --> OK[Status: OK / INFO]
+    Analisis -- Ya --> Fault[Tentukan Severity]
+    
+    Fault -->|WARNING| Recover{Percobaan Recovery < Max?}
+    Recover -- Ya --> Attempt[Eksekusi Aksi Recovery di Background]
+    Recover -- Tidak --> Escalate[Eskalasi ke CRITICAL]
+    
+    Fault -->|CRITICAL| ActionCrit[Kirim RC Neutral + Mode MANUAL]
+    Fault -->|EMERGENCY| ActionEmer[Kirim Perintah DISARM + Alert Dashboard Merah]
 ```
-[Pixhawk/SITL]
-       │ (Kirim pesan MAVLink: ATTITUDE, SYS_STATUS, etc.)
-       ▼
-[MAVLinkBridge (Thread Reader)]
-       │ (Pesan mentah dilempar ke callback)
-       ▼
-[TelemetryManager] ──► (Update state internal baterai, orientasi, sensor kedalaman)
-       │ (Picu callback on_telemetry_update)
-       ▼
-[TrajectoryEstimator] ──► (Kalkulasi Dead Reckoning: posisi X/Y/Depth baru)
-       │ (Picu callback rate-limited 0.1s)
-       ▼
-[Socket.IO Emit] ──► (Kirim event 'telemetry_update' & 'trajectory_update') ──► [React Frontend]
-```
 
-### 2.3. Alur Kontrol & RC Override (Joystick)
-1. Frontend React menangkap input joystick dari operator, lalu mengirimkan event WebSocket `cmd_rc_override` dengan objek data channel PWM.
-2. `routes.py` menerima event tersebut:
-   - Meneruskan channel PWM ke `MAVLinkBridge.rc_override()` untuk dikirimkan langsung ke Pixhawk sebagai input kontrol motor/thruster.
-   - Mengonversi channel pitch dan roll joystick ke representasi kecepatan (m/s) dan memanggil `TrajectoryEstimator.update_velocity(vel_x, vel_y)`.
-3. Pada iterasi telemetry berikutnya, `TrajectoryEstimator` menggunakan data kecepatan ini bersama yaw orientasi untuk mengintegrasikan jarak perpindahan koordinat ROV ($\Delta x$, $\Delta y$) berdasarkan interval waktu ($\Delta t$).
-
-### 2.4. Alur Deteksi QR & Docking
-1. `CameraBottom` mengambil frame gambar mentah dari sensor bawah.
-2. Frame didekatkan ke filter preprocessing (grayscale + adaptive thresholding) untuk memperjelas batas visual QR code.
-3. `QRDetector` memindai frame preprocessed dengan pustaka `pyzbar`.
-4. Jika QR code terdeteksi:
-   - Bounding box digambar di stream MJPEG.
-   - Fungsi `_check_alignment` menghitung koordinat titik tengah QR code. Jika jarak antara pusat QR code dengan pusat frame berada di bawah 50 piksel (`DOCK_CENTER_TOLERANCE_PX`), state docking berubah menjadi **`dock_aligned`**. Jika keluar atau QR hilang, state berubah menjadi **`dock_lost`**.
-   - Hasil teks QR dimasukkan ke `qr_result_queue`.
-   - Event status docking dimasukkan ke `dock_event_queue`.
-5. Di proses `CoreAPI`, `QueueDrainer` membaca queue asinkron tersebut:
-   - Untuk data QR baru, memanggil callback untuk merekam QR ke history internal (disimpan maksimal 100 riwayat teranyar).
-   - Memancarkan event WebSocket `qr_detected`, `dock_aligned`, atau `dock_lost` ke seluruh klien React yang terhubung.
-
-### 2.5. Alur Aksi Kamera (Screenshot & Recording)
-1. Frontend mengirimkan HTTP POST request ke endpoint REST (misalnya `POST /api/camera/front/screenshot`).
-2. Core API memproses request tersebut di `routes.py` dan memanggil `_send_camera_cmd(camera, action)` yang memasukkan perintah ke shared queue terkait (misal `cmd_front_queue`).
-3. Core API langsung memberikan respons HTTP REST `200 OK` (atau `503` jika antrean penuh) tanpa memblokir thread HTTP untuk menunggu hasil proses penyimpanan gambar.
-4. Di background capture thread proses kamera, loop utama memanggil `_handle_commands()` secara berkala:
-   - Mengambil perintah dari `cmd_queue` secara non-blocking.
-   - Mengeksekusi aksi: menyimpan frame mentah tanpa HUD ke disk (`FrontScreenshot` / `BottomScreenshot`) atau memulai/menghentikan objek `cv2.VideoWriter` (`FrontRecorder` / `BottomRecorder`).
-5. Setelah file tersimpan atau gagal, proses kamera memasukkan payload status ke `result_camera_queue`.
-6. `QueueDrainer` di Core API menarik payload tersebut dan memancarkan event `camera_result` via WebSocket ke frontend agar UI React dapat menampilkan notifikasi visual keberhasilan aksi beserta tautan berkasnya.
+### 2.3. Alur Logging Terpusat (`logger.py`)
+Sistem logging dirancang agar seragam di semua sub-proses:
+- **Daily Log File (`logs/rov_YYYY-MM-DD.log`)**: Menyimpan seluruh log sistem dari level DEBUG hingga CRITICAL. Batas ukuran 10MB per file dengan rotasi maksimum 30 backup file.
+- **Error Log File (`logs/rov_error.log`)**: Hanya menyimpan log level ERROR dan CRITICAL untuk investigasi pasca-misi yang cepat.
+- **Warna Console (ANSI Codes)**: Terminal menampilkan warna berbeda per level log (Abu-abu untuk DEBUG, Biru untuk INFO, Kuning untuk WARNING, Merah untuk ERROR, dan Magenta untuk CRITICAL) dengan layout teratur yang mencantumkan nama proses dan modul.
+- **ROVLogger Wrapper**: Menyediakan method semantik yang mempermudah pembacaan kode, seperti `.camera_open()`, `.qr_detected()`, `.failsafe_trigger()`, dan `.webrtc_connected()`.
 
 ---
 
-## 3. Dokumentasi Endpoint API Lengkap
+## 3. Spesifikasi Perangkat Keras & Protokol (Elektronik & Embedded)
 
-### 3.1. Informasi Dasar Server
-* **Core API Server (REST & Socket.IO)**: `http://localhost:8000`
-* **Stream Kamera Depan (MJPEG)**: `http://localhost:8001/stream`
-* **Stream Kamera Bawah (MJPEG)**: `http://localhost:8002/stream`
+Bagi divisi elektronik dan embedded system, berikut spesifikasi integrasi fisik dan datalink ROV:
+
+### 3.1. Hubungan Kabel & Antarmuka Fisik (Wiring & Interface)
+- **Komputer Pendamping (Companion Computer)**: Raspberry Pi 4 B (atau sejenisnya).
+- **Flight Controller (FC)**: Pixhawk 2.4.8 / Pixhawk 4 yang menjalankan firmware **ArduSub**.
+- **Koneksi Datalink (FC - Pi)**: Kabel USB-to-MicroUSB terhubung dari port USB Raspberry Pi ke port TELEM1/TELEM2 Pixhawk (atau port USB Pixhawk) melalui modul FTDI jika menggunakan port serial.
+- **Kamera**: Kamera USB tipe UVC (USB Video Class) yang kompatibel dengan OpenCV tanpa driver tambahan.
+- **Lampu Utama**: Terhubung ke pin Relay Pixhawk (dikontrol via MAVLink `MAV_CMD_DO_SET_RELAY`).
+- **Gripper**: Servo PWM terhubung ke port output AUX Pixhawk (AUX 1 - AUX 6, dikontrol via MAVLink `MAV_CMD_DO_SET_SERVO`).
+- **Jaringan Komunikasi (Pi - GCS)**: Kabel LAN Ethernet (tether) Cat5e/Cat6 melewati slip-ring ke permukaan, dihubungkan ke laptop GCS menggunakan adapter ethernet USB. IP Raspberry Pi dikonfigurasi statis (misal `192.168.1.100`).
+
+### 3.2. Protokol Datalink MAVLink
+- **Connection String**: `udp:0.0.0.0:14550` (jika menggunakan jembatan proxy QGroundControl/Mavproxy) atau langsung menggunakan dev serial port (misal `/dev/ttyACM0` atau `/dev/ttyUSB0`).
+- **Baudrate Serial**: `115200` bps.
+- **Baudrate MAVLink**: MAVLink v2.0 (diaktifkan untuk mendukung channel override hingga 18 channel).
+- **Source System ID**: `255` (Raspberry Pi bertindak sebagai Ground Control Station (GCS) virtual).
+- **Target System ID**: `1` (Autopilot Pixhawk).
 
 ---
 
-### 3.2. REST API Endpoints
+## 4. Dokumentasi API Lengkap (Untuk Frontend & REST)
 
-#### 1. `GET /api/status`
-* **Deskripsi**: Mengecek status operasi server utama serta konektivitas MAVLink ke Pixhawk.
-* **Headers**: `Content-Type: application/json`
-* **Response Contoh (200 OK)**:
+### 4.1. HTTP REST API (Flask)
+
+#### 1. Status Utama
+`GET /api/status`
+- **Respons (200 OK)**:
   ```json
   {
     "service": "ROV Core API",
     "status": "running",
-    "timestamp": "2026-06-27T03:39:22.123456",
-    "mavlink": {
-      "connected": true
-    }
+    "timestamp": "2026-07-02T13:41:29Z",
+    "mavlink": { "connected": true }
   }
   ```
 
-#### 2. `GET /api/streams`
-* **Deskripsi**: Mendapatkan URL streaming video MJPEG beserta endpoint status health dari masing-masing kamera.
-* **Response Contoh (200 OK)**:
+#### 2. Konfigurasi Streaming Kamera
+`GET /api/streams`
+- **Respons (200 OK)**:
   ```json
   {
     "front": {
-      "stream_url": "http://localhost:8001/stream",
-      "health_url": "http://localhost:8001/health"
+      "stream_url": "http://192.168.1.100:8001/stream",
+      "webrtc_url": "http://192.168.1.100:8001/offer",
+      "health_url": "http://192.168.1.100:8001/health"
     },
     "bottom": {
-      "stream_url": "http://localhost:8002/stream",
-      "health_url": "http://localhost:8002/health"
+      "stream_url": "http://192.168.1.100:8002/stream",
+      "webrtc_url": "http://192.168.1.100:8002/offer",
+      "health_url": "http://192.168.1.100:8002/health"
     }
   }
   ```
 
-#### 3. `GET /api/telemetry`
-* **Deskripsi**: Mendapatkan snapshot data telemetry terakhir dari sistem sensor ROV.
-* **Response Contoh (200 OK)**:
+#### 3. snapshot Telemetri Terakhir
+`GET /api/telemetry`
+- **Respons (200 OK)**:
   ```json
   {
-    "roll": 1.25,
-    "pitch": -0.84,
-    "yaw": 182.4,
-    "depth": 1.450,
-    "battery_voltage": 16.48,
-    "battery_current": 4.21,
-    "battery_remaining": 88,
-    "lat": -6.2000000,
-    "lon": 106.8166660,
-    "gps_fix": 3,
+    "roll": 2.1,
+    "pitch": -0.5,
+    "yaw": 270.4,
+    "depth": 1.25,
+    "battery_voltage": 14.8,
+    "battery_current": 5.4,
+    "battery_remaining": 82,
+    "lat": 0.0,
+    "lon": 0.0,
+    "gps_fix": 0,
     "armed": true,
     "mode": "DEPTH_HOLD",
-    "accel_x": 0.012,
-    "accel_y": -0.004,
-    "accel_z": 0.981,
-    "gyro_x": 0.001,
-    "gyro_y": 0.000,
-    "gyro_z": -0.002,
-    "last_update": 1782559162.88
+    "accel_x": 0.0,
+    "accel_y": 0.0,
+    "accel_z": 1.0,
+    "gyro_x": 0.0,
+    "gyro_y": 0.0,
+    "gyro_z": 0.0,
+    "last_update": 1719912345.67
   }
   ```
 
-#### 4. `GET /api/trajectory`
-* **Deskripsi**: Mendapatkan snapshot koordinat estimasi posisi saat ini serta array history lintasan (trail) koordinat ROV.
-* **Response Contoh (200 OK)**:
+#### 4. Reset Koordinat Posisi
+`POST /api/trajectory/reset`
+- **Respons (200 OK)**:
   ```json
-  {
-    "current_pos": {
-      "x": 1.425,
-      "y": 0.985,
-      "depth": 1.450
-    },
-    "orientation": {
-      "roll": 1.25,
-      "pitch": -0.84,
-      "yaw": 182.4
-    },
-    "path": [
-      {
-        "x": 0.0,
-        "y": 0.0,
-        "depth": 0.0,
-        "yaw": 0.0,
-        "timestamp": 1782559100.0
-      },
-      {
-        "x": 0.12,
-        "y": 0.08,
-        "depth": 0.45,
-        "yaw": 10.5,
-        "timestamp": 1782559105.5
-      }
-    ],
-    "timestamp": 1782559163.12
-  }
+  { "message": "Trajectory reset ke origin" }
   ```
 
-#### 5. `POST /api/trajectory/reset`
-* **Deskripsi**: Mengatur ulang (reset) koordinat posisi estimasi ROV di `TrajectoryEstimator` kembali ke koordinat origin `(0,0,0)` dan mengosongkan trail path.
-* **Response Contoh (200 OK)**:
+#### 5. Riwayat Deteksi QR Code
+`GET /api/qr/history`
+- **Respons (200 OK)**:
   ```json
   {
-    "message": "Trajectory reset ke origin"
-  }
-  ```
-
-#### 6. `GET /api/qr/history`
-* **Deskripsi**: Mendapatkan riwayat pembacaan QR Code dari kamera bawah (maksimal 50 entri terakhir yang dikembalikan).
-* **Response Contoh (200 OK)**:
-  ```json
-  {
-    "count": 2,
+    "count": 1,
     "history": [
       {
-        "type": "qr_detected",
-        "data": "DOCK_MARKER_01",
-        "aligned": false,
-        "timestamp": 1782559110.12,
-        "received_at": "2026-06-27T03:39:40.123456"
-      },
-      {
-        "type": "qr_detected",
-        "data": "DOCK_MARKER_01",
+        "data": "TARGET_A",
         "aligned": true,
-        "timestamp": 1782559115.45,
-        "received_at": "2026-06-27T03:39:45.456789"
+        "received_at": "2026-07-02T13:41:00Z"
       }
     ]
   }
   ```
 
-#### 7. `DELETE /api/qr/history`
-* **Deskripsi**: Menghapus seluruh riwayat data pemindaian QR Code dari memori server API.
-* **Response Contoh (200 OK)**:
+`DELETE /api/qr/history`
+- **Respons (200 OK)**:
   ```json
-  {
-    "message": "QR history cleared"
-  }
+  { "message": "QR history cleared" }
   ```
 
-#### 8. `GET /api/health`
-* **Deskripsi**: Endpoint pemeriksaan kesehatan sederhana (health check) dari Core API.
-* **Response Contoh (200 OK)**:
-  ```json
-  {
-    "status": "ok"
-  }
-  ```
-
-#### 9. `POST /api/camera/<cam>/screenshot`
-* **Deskripsi**: Meminta proses kamera tertentu (`front` atau `bottom`) untuk menyimpan satu snapshot frame mentah (.jpg) tanpa rendering HUD/overlay ke disk.
-* **Path Parameters**:
-  * `cam`: `front` atau `bottom`
-* **Response Contoh (200 OK - Terantre)**:
+#### 6. Perintah Kamera (Screenshot & Rekaman)
+Ganti `<cam>` dengan `front` atau `bottom`.
+- **POST `/api/camera/<cam>/screenshot`** -> Simpan frame mentah ke folder `storage/screenshots/`.
+- **POST `/api/camera/<cam>/record/start`** -> Mulai rekam video ke folder `storage/recordings/`.
+- **POST `/api/camera/<cam>/record/stop`** -> Stop rekam video.
+- **Respons Umum (200 OK)**:
   ```json
   {
     "camera": "front",
@@ -312,122 +261,76 @@ Sistem terdiri dari tiga proses mandiri yang dieksekusi dari [main.py](file:///d
     "message": "Command 'screenshot' dikirim ke kamera front"
   }
   ```
-* **Response Contoh (503 Service Unavailable - Queue Penuh)**:
-  ```json
-  {
-    "camera": "front",
-    "action": "screenshot",
-    "queued": false,
-    "message": "Gagal kirim command: Queue penuh"
-  }
-  ```
-* **Response Contoh (400 Bad Request - Parameter Salah)**:
-  ```json
-  {
-    "error": "camera harus 'front' atau 'bottom'"
-  }
-  ```
 
-#### 10. `POST /api/camera/<cam>/record/start`
-* **Deskripsi**: Memulai proses perekaman video mentah (.mp4) pada kamera tertentu (`front` atau `bottom`).
-* **Path Parameters**:
-  * `cam`: `front` atau `bottom`
-* **Response Contoh (200 OK - Terantre)**:
-  ```json
-  {
-    "camera": "bottom",
-    "action": "record_start",
-    "queued": true,
-    "message": "Command 'record_start' dikirim ke kamera bottom"
-  }
-  ```
+#### 7. Status Kesehatan Failsafe & Log Keamanan
+`GET /api/failsafe/status`
+- **Respons (200 OK)**: Sama dengan payload event WebSocket `failsafe_status`.
 
-#### 11. `POST /api/camera/<cam>/record/stop`
-* **Deskripsi**: Menghentikan proses perekaman video aktif pada kamera tertentu dan menyimpan hasilnya ke disk.
-* **Path Parameters**:
-  * `cam`: `front` atau `bottom`
-* **Response Contoh (200 OK - Terantre)**:
+`GET /api/failsafe/events?limit=50`
+- **Respons (200 OK)**:
   ```json
-  {
-    "camera": "front",
-    "action": "record_stop",
-    "queued": true,
-    "message": "Command 'record_stop' dikirim ke kamera front"
-  }
-  ```
-
-#### 12. `GET http://localhost:8001/health` (Kamera Depan) / `GET http://localhost:8002/health` (Kamera Bawah)
-* **Deskripsi**: Endpoint pemantauan langsung pada server stream internal untuk mengecek kondisi hardware sensor kamera OpenCV.
-* **Response Contoh (200 OK)**:
-  ```json
-  {
-    "camera": "front",
-    "status": "ok",
-    "recording": false,
-    "record_file": null
-  }
+  [
+    {
+      "timestamp": "2026-07-02T13:41:00Z",
+      "subsystem": "mavlink",
+      "severity": "WARNING",
+      "message": "Heartbeat timeout 5.2s",
+      "action": "reconnect_mavlink"
+    }
+  ]
   ```
 
 ---
 
-### 3.3. WebSocket (Socket.IO) Events
+### 4.2. WebSocket Events (Socket.IO)
 
-#### 3.3.1. Inbound Events (Klien React ──► Server Core API)
+#### 4.2.1. Inbound Events (React -> CoreAPI)
+- `cmd_arm` / `cmd_disarm`: Aktivasi motor penggerak.
+- `cmd_set_mode`: Payload `{ "mode": "MANUAL" }`. Mengubah mode Pixhawk.
+- `cmd_gripper`: Payload `{ "action": "open" }` atau `{ "action": "close" }`.
+- `cmd_light`: Payload `{ "state": true }` atau `{ "state": false }`.
+- `cmd_rc_override`: Payload `{ "channels": { "1": 1500, "2": 1600, ... } }`. Kontrol throttle/kemudi motor.
+- `cmd_emergency_stop`: Payload `{ "reason": "Operator E-Stop" }`. Mematikan motor instan.
+- `cmd_clear_emergency`: Mereset status E-Stop pasca kejadian.
 
-| Nama Event | Payload | Fungsi / Keterangan |
-| :--- | :--- | :--- |
-| `ping_rov` | `string` / `object` | Melakukan ping tes koneksi. Server akan merespons langsung dengan `pong_rov` yang berisi echo data yang sama. |
-| `cmd_arm` | *(kosong / null)* | Mengirimkan perintah arming ke Pixhawk untuk menyalakan motor thruster. |
-| `cmd_disarm` | *(kosong / null)* | Mengirimkan perintah disarming ke Pixhawk untuk mematikan motor demi keamanan. |
-| `cmd_set_mode`| `{"mode": "DEPTH_HOLD"}` | Mengubah flight mode Pixhawk (e.g. `MANUAL`, `STABILIZE`, `DEPTH_HOLD`, `ALT_HOLD`). |
-| `cmd_gripper` | `{"action": "open"}` atau `{"action": "close"}` | Mengontrol gripper lengan mekanik ROV dengan mengatur PWM servo pada channel AUX. |
-| `cmd_light` | `{"state": true}` atau `{"state": false}` | Menyalakan atau mematikan lampu sorot utama ROV menggunakan perintah relay Pixhawk. |
-| `cmd_rc_override` | `{"channels": {"1": 1500, "2": 1600, ...}}` | Mengesampingkan (override) channel kontrol radio (RC) Pixhawk. Secara bersamaan meng-update velocity input pada `TrajectoryEstimator` untuk mengalkulasi dead reckoning. |
-
-#### 3.3.2. Outbound Events (Server Core API ──► Klien React)
-
-| Nama Event | Payload | Deskripsi / Kondisi Pemicu |
-| :--- | :--- | :--- |
-| `pong_rov` | `{"echo": <data>}` | Respons balik asinkron atas event `ping_rov` klien. |
-| `telemetry_update` | Objek telemetry lengkap (lihat struktur `GET /api/telemetry`) | Dikirim secara broadcast tiap kali ada data status sensor orientasi/telemetry baru ter-parsing dari Pixhawk. |
-| `trajectory_update` | Objek trajectory lengkap (lihat struktur `GET /api/trajectory`) | Dikirim secara broadcast maksimal sekali tiap 0.1 detik (`TRAJECTORY_UPDATE_INTERVAL`) yang memuat data trail titik koordinat posisi ROV terbaru. |
-| `mavlink_status` | `{"connected": true\|false}` | Menginfokan status koneksi link data serial/UDP antara Core API dengan modul hardware Pixhawk. Dikirimkan saat inisialisasi koneksi awal dan saat status berubah. |
-| `qr_detected` | `{"type": "qr_detected", "data": "STRING", "aligned": true\|false, "timestamp": 1234567.89}` | Menginfokan jika kamera bawah mendeteksi adanya QR Code baru yang masuk dalam frame bidik. |
-| `dock_aligned` | `{"type": "dock_aligned", "aligned": true, "timestamp": 1234567.89}` | Dikirimkan sekali ketika ROV masuk ke dalam posisi terpusat (aligned) di atas docking station. |
-| `dock_lost` | `{"type": "dock_lost", "aligned": false, "timestamp": 1234567.89}` | Dikirimkan sekali ketika alignment posisi ROV bergeser keluar dari area docking station. |
-| `camera_result` | `{"camera": "front\|bottom", "action": "screenshot\|record_start\|record_stop", "status": "ok\|error", "filepath": "...", "filename": "..."}` | Mengirimkan laporan hasil aksi asinkron dari proses kamera ke antarmuka operator di frontend. |
+#### 4.2.2. Outbound Events (CoreAPI -> React)
+- `telemetry_update`: Broadcast berkala data telemetri ROV.
+- `trajectory_update`: Broadcast data lintasan koordinat 2D/3D untuk visualisasi jalur.
+- `mavlink_status`: Payload `{ "connected": true|false }`. Status link Pixhawk.
+- `failsafe_status`: Snapshot status kesehatan seluruh subsistem Pi.
+- `failsafe_event`: Alert jika terjadi peringatan atau recovery aksi failsafe.
+- `emergency_stop`: Sinyal kritis memaksa dashboard memicu antarmuka alarm merah terkunci.
+- `qr_detected`: Payload `{ "data": "QR_A", "aligned": true|false }`.
+- `camera_result`: Payload konfirmasi hasil penyimpanan berkas rekaman/screenshot.
 
 ---
 
-## 4. Temuan Analisis & Rekomendasi Perbaikan (Saran Perbaikan)
+## 5. Panduan Pengembangan & Pemeliharaan (Penerus Proyek)
 
-Berdasarkan tinjauan menyeluruh terhadap struktur kode sistem, berikut adalah beberapa temuan kelemahan struktural beserta usulan perbaikan teknis yang konkret:
+Bagi pengembang penerus sistem ROV ini, berikut langkah penanganan berkas dan troubleshooting:
 
-### 4.1. Pemantauan & Autorestart Proses Anak (Process Recovery)
-* **Kelemahan**: Pada file `main.py` baris 156-163, terdapat loop pemantauan status proses anak. Jika proses `CoreAPI`, `CameraFront`, atau `CameraBottom` mengalami *crash* (misal karena kamera USB terputus sementara atau port server bentrok), sistem hanya mencetak log warning (`TODO: implementasi restart logic di sini jika perlu`) tetapi tidak mengambil tindakan penyelematan apa pun. Hal ini membuat sistem ROV tidak handal saat digunakan di lapangan.
-* **Saran Perbaikan**: Implementasikan logika *respawning* mandiri dengan pembatasan jumlah percobaan maksimum (*max retries*) untuk mencegah *infinite crash loop* jika terjadi kegagalan hardware permanen.
-  ```python
-  # Rekomendasi perbaikan pada main.py:
-  if not p.is_alive():
-      logger.warning(f"[!] Proses '{p.name}' mati (exitcode={p.exitcode}), menghidupkan kembali...")
-      # Salin argumen dan target dari konfigurasi asli, lalu spawn ulang proses
-      new_p = multiprocessing.Process(target=cfg_target, args=cfg_args, name=p.name, daemon=False)
-      new_p.start()
-      _processes[idx] = new_p
-  ```
+### 5.1. Struktur File Utama
+- [main.py](file:///d:/PROJECT%20ROV/rov_revisi_stream/main.py): Entry point utama multiproses. Loop monitoring dan shutdown graceful disematkan di sini.
+- [config.py](file:///d:/PROJECT%20ROV/rov_revisi_stream/config.py): Pusat parameter threshold failsafe, port server, pin channel servo, dan setting algoritma kamera.
+- [core/logger.py](file:///d:/PROJECT%20ROV/rov_revisi_stream/core/logger.py): Pengaturan logging terpusat dan implementasi colored formatter.
+- [core/failsafe.py](file:///d:/PROJECT%20ROV/rov_revisi_stream/core/failsafe.py): State machine logika kemudi darurat.
+- [core/routes.py](file:///d:/PROJECT%20ROV/rov_revisi_stream/core/routes.py): Endpoint routing Flask dan penanganan event Socket.IO.
+- [core/websocket.py](file:///d:/PROJECT%20ROV/rov_revisi_stream/core/websocket.py): Penguras shared queue proses kamera (*Queue Drainer*).
+- [core/mavlink.py](file:///d:/PROJECT%20ROV/rov_revisi_stream/core/mavlink.py): Bridge komunikasi serial PyMAVLink.
 
-### 4.2. Mekanisme Reconnection MAVLink yang Kokoh (Auto-Reconnect)
-* **Kelemahan**: Kelas `MAVLinkBridge` dalam `core/mavlink.py` memiliki fungsi retry koneksi sebanyak 12 kali saat inisialisasi awal (`connect()`). Namun, jika koneksi serial/UDP terputus di tengah operasi (misal kabel Pixhawk longgar saat manuver air), thread pembaca `_reader_loop` hanya akan menangkap exception, menampilkan warning log, lalu tidur selama 0.5 detik dalam perulangan tanpa batas tanpa mencoba memanggil prosedur penyambungan ulang (`connect()`) secara utuh. Telemetry pun akan membeku selamanya.
-* **Saran Perbaikan**: Modifikasi loop pembacaan MAVLink untuk mendeteksi hilangnya *heartbeat* secara periodik atau kegagalan baca berulang, lalu memicu status `_connected = False` dan menstart ulang proses koneksi di background thread baru tanpa menghentikan core server Flask.
+### 5.2. Langkah Menjalankan Sistem
+1. Pastikan virtual environment Python aktif dan dependensi terpasang:
+   ```bash
+   pip install -r requirements.txt
+   ```
+2. Jalankan sistem melalui script utama:
+   ```bash
+   python main.py
+   ```
+3. Tekan `Ctrl+C` di terminal untuk menghentikan seluruh sub-proses secara bersih (*graceful shutdown*).
 
-### 4.3. Skalabilitas Penyimpanan Data QR Code
-* **Kelemahan**: Riwayat QR code disimpan pada variabel in-memory list (`_qr_history`) di dalam `core/routes.py`. Jika proses `CoreAPI` di-restart, seluruh riwayat pemindaian QR code yang bernilai historis penting selama misi ROV akan langsung hilang.
-* **Saran Perbaikan**: Simpan data deteksi ke dalam file lokal terstruktur (e.g. SQLite database mini atau file JSON flat) di dalam direktori `storage/` agar data bersifat persistent dan aman dari crash server.
-
-### 4.4. Validasi Format Payload Payload API & Socket.IO
-* **Kelemahan**: REST API dan penangan Socket.IO (`routes.py`) saat ini langsung memproses dictionary input dari klien frontend (misalnya `data.get("mode")` atau `data.get("channels")`) secara mentah tanpa adanya validasi tipe data (type casting) atau penanganan exception yang menyeluruh. Contohnya, jika payload `channels` tidak menyertakan index bertipe integer pada key, pemanggilan parser `int(k)` akan menyebabkan crash internal thread WebSocket.
-* **Saran Perbaikan**: Gunakan skema validasi data sederhana (misalnya validasi struktur manual dengan blok `try-except KeyError` yang solid, atau menggunakan pustaka validasi data seperti `pydantic` atau Marshmallow) sebelum data diteruskan ke MAVLink bridge.
-
-### 4.5. Penggunaan Shared Queue `frame_snapshot` yang Terbengkalai
-* **Kelemahan**: Pustaka `shared_queue.py` menginisialisasi antrean `frame_snapshot`, namun queue ini tidak pernah di-pass ke proses kamera maupun dibaca oleh Core API di `main.py`.
-* **Saran Perbaikan**: Hapus instansiasi `frame_snapshot` jika memang tidak diperlukan untuk merapikan alokasi memory IPC, atau gunakan antrean tersebut untuk mengalirkan frame gambar mentah berukuran kecil dari kamera bawah ke Core API agar API REST `/api/status` dapat memberikan visualisasi status kesehatan visual secara real-time.
+### 5.3. Troubleshooting Masalah Umum
+- **MAVLink Tidak Terhubung**: Pastikan kabel USB/Serial terpasang dengan baik pada port Pixhawk. Cek dev path menggunakan perintah `ls /dev/ttyACM*` di Linux Pi dan sesuaikan `MAVLINK_CONNECTION_STRING` pada `config.py`.
+- **Kamera Gagal Terbuka (Exit Code Proses Kamera != 0)**: OpenCV gagal membaca index hardware. Cek ketersediaan kamera dengan perintah `v4l2-ctl --list-devices` dan perbarui `CAMERA_FRONT_INDEX` atau `CAMERA_BOTTOM_INDEX` di `config.py`.
+- **Dashboard Tidak Menerima Data**: Cek apakah port server `8000` diblokir oleh Windows Defender Firewall atau UFW Linux Pi. Pastikan React client melakukan inisialisasi Socket.IO dengan opsi `{ transports: ["websocket"] }`.
+- **Delay Umpan Video Tinggi**: Kurangi resolusi frame (e.g., `640x480`) atau turunkan kualitas kompresi JPEG (`MJPEG_QUALITY = 80`) di file `config.py` untuk meringankan beban transmisi jaringan tether.
