@@ -23,4 +23,7 @@ pymavlink>=2.4.40              # MAVLink komunikasi dengan UART
 python-dotenv>=1.0.0        # load .env file (opsional, untuk konfigurasi via env var)
 
 # ── WebRTC ─────────────────────────────────────
-aiortc>=1.6.0               # WebRTC streaming
+aiortc>=1.6.0               # WebRTC streaming
+
+# ── Failsafe & Watchdog ─────────────────────────────────────
+psutil>=5.9.0

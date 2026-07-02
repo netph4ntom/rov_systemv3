@@ -95,3 +95,21 @@ JOYSTICK_SCALE_MS = 1.0              # Skala velocity untuk dead reckoning traje
 # ──────────────────────────────────────────────
 TRAJECTORY_HISTORY_SIZE    = 500     # jumlah titik path yang disimpan
 TRAJECTORY_UPDATE_INTERVAL = 0.1     # minimum interval emit ke React (detik)
+
+# ──────────────────────────────────────────────
+# FAILSAFE & WATCHDOG
+# ──────────────────────────────────────────────
+
+FS_CHECK_INTERVAL = 2.0
+FS_MAVLINK_TIMEOUT = 5.0
+FS_DASHBOARD_TIMEOUT = 30.0
+FS_TELEMETRY_TIMEOUT = 5.0
+
+FS_CAMERA_HEALTH_URL_FRONT  = f"http://localhost:{PORT_STREAM_FRONT}/health"
+FS_CAMERA_HEALTH_URL_BOTTOM = f"http://localhost:{PORT_STREAM_BOTTOM}/health"
+
+FS_CPU_WARN_PERCENT  = 85.0   # persen
+FS_RAM_WARN_PERCENT  = 85.0   # persen
+FS_TEMP_WARN_CELSIUS = 70.0   # derajat Celsius
+
+FS_MAX_RECOVERY_ATTEMPTS = 3

@@ -32,6 +32,9 @@ class MAVLinkBridge:
         self._reader_thread:    Optional[threading.Thread] = None
         self._heartbeat_thread: Optional[threading.Thread] = None
         self.on_message_callback = None
+        
+        # Dipakai failsafe untuk cek apakah Pixhawk masih mengirim heartbeat
+        self._last_heartbeat_time = None
 
     # ──────────────────────────────────────────
     # Koneksi
@@ -45,7 +48,7 @@ class MAVLinkBridge:
         for attempt in range(1, CONNECT_MAX_RETRIES + 1):
             logger.info(
                 f"[MAVLink] Connect attempt {attempt}/{CONNECT_MAX_RETRIES} "
-                f"→ {MAVLINK_CONNECTION_STRING}"
+                f"{MAVLINK_CONNECTION_STRING}"
             )
             try:
                 self._conn = mavutil.mavlink_connection(
@@ -92,6 +95,14 @@ class MAVLinkBridge:
     @property
     def is_connected(self) -> bool:
         return self._connected and self._conn is not None
+    
+    @property
+    def last_heartbeat_time(self):
+        """
+        Timestamp heartbeat terakhir dari Pixhawk.
+        Dipakai oleh FailsafeWatchdog.
+        """
+        return self._last_heartbeat_time
 
     # ──────────────────────────────────────────
     # Background threads
@@ -120,6 +131,8 @@ class MAVLinkBridge:
                 if msg.get_type() == "BAD_DATA":
                     logger.debug("[MAVLink] BAD_DATA frame diabaikan")
                     continue
+                if msg.get_type() == "HEARTBEAT":
+                    self._last_heartbeat_time = time.time()
                 if self.on_message_callback:
                     try:
                         self.on_message_callback(msg)
@@ -163,7 +176,7 @@ class MAVLinkBridge:
         if mode_id is None:
             logger.error(f"[MAVLink] Mode '{mode_name}' tidak dikenal")
             return
-        logger.info(f"[MAVLink] SET_MODE → {mode_name} (id={mode_id})")
+        logger.info(f"[MAVLink] SET_MODE -> {mode_name} (id={mode_id})")
         with self._lock:
             self._conn.mav.set_mode_send(
                 self._conn.target_system,
@@ -173,7 +186,7 @@ class MAVLinkBridge:
 
     def gripper(self, action: str):
         pwm = SERVO_GRIPPER_OPEN_PWM if action == "open" else SERVO_GRIPPER_CLOSE_PWM
-        logger.info(f"[MAVLink] GRIPPER {action} → PWM={pwm}")
+        logger.info(f"[MAVLink] GRIPPER {action} -> PWM={pwm}")
         self._command_long(
             mavutil.mavlink.MAV_CMD_DO_SET_SERVO,
             param1=float(SERVO_GRIPPER_CHANNEL),

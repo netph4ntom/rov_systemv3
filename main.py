@@ -39,23 +39,18 @@ from core.routes import run_core_server
 from camera_front.stream_server import run_front_stream_server
 from camera_bottom.stream_server import run_bottom_stream_server
 from config import LOG_DIR, LOG_LEVEL
+from core.logger import setup_logging, log_startup, log_shutdown, get_logger
 
 # ──────────────────────────────────────────────
-# Setup logging
+# Setup logging terpusat (core.logger)
 # ──────────────────────────────────────────────
+# setup_logging() menginisialisasi:
+#   - Terminal output dengan ANSI color
+#   - File harian: logs/rov_YYYY-MM-DD.log (rotating, max 10MB)
+#   - File error : logs/rov_error.log      (ERROR + CRITICAL only)
 from typing import List
-import os
-os.makedirs(LOG_DIR, exist_ok=True)
-
-logging.basicConfig(
-    level=getattr(logging, LOG_LEVEL, logging.INFO),
-    format="%(asctime)s [%(processName)s] %(levelname)s %(name)s: %(message)s",
-    handlers=[
-        logging.StreamHandler(sys.stdout),
-        logging.FileHandler(os.path.join(LOG_DIR, "rov.log")),
-    ]
-)
-logger = logging.getLogger("main")
+setup_logging(log_dir=LOG_DIR, log_level=LOG_LEVEL)
+logger = get_logger("main")
 
 
 # ──────────────────────────────────────────────
@@ -70,6 +65,7 @@ def _shutdown(signum, frame):
             p.terminate()
     for p in _processes:
         p.join(timeout=3)
+    log_shutdown(reason="Signal interrupt" if signum else "Keyboard interrupt")
     logger.info("Semua proses dihentikan. Selamat tinggal!")
     sys.exit(0)
 
@@ -85,9 +81,7 @@ def main():
     signal.signal(signal.SIGINT,  _shutdown)
     signal.signal(signal.SIGTERM, _shutdown)
 
-    logger.info("=" * 60)
-    logger.info("  ROV Vision System — Starting up")
-    logger.info("=" * 60)
+    log_startup(version="1.0.0")
 
     # Buat shared Manager dan queues
     manager = multiprocessing.Manager()

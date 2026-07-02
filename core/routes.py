@@ -26,7 +26,7 @@
 
 # core/routes.py
 
-import logging
+from core.logger import get_logger, setup_logging
 import threading
 import multiprocessing
 from datetime import datetime
@@ -39,6 +39,7 @@ from core.websocket  import init_socketio, register_handlers, start_queue_draine
 from core.mavlink    import MAVLinkBridge
 from core.telemetry  import TelemetryManager
 from core.trajectory import TrajectoryEstimator
+from core.failsafe   import FailsafeWatchdog
 from config import (
     PORT_CORE_API,
     PORT_STREAM_FRONT,
@@ -47,7 +48,7 @@ from config import (
     JOYSTICK_SCALE_MS,
 )
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 _qr_history: List[dict] = []
 QR_HISTORY_MAX = 100
@@ -57,6 +58,10 @@ _tele: Optional[TelemetryManager]   = None
 _traj: Optional[TrajectoryEstimator]= None
 _cmd_front:  Optional[multiprocessing.Queue] = None
 _cmd_bottom: Optional[multiprocessing.Queue] = None
+_fs: Optional[FailsafeWatchdog] = None
+
+_active_clients = 0
+_clients_lock = threading.Lock()
 
 
 def _send_camera_cmd(camera: str, action: str) -> Tuple[bool, str]:
@@ -76,10 +81,13 @@ def create_app(
     traj:       TrajectoryEstimator,
     cmd_front:  multiprocessing.Queue,
     cmd_bottom: multiprocessing.Queue,
+    fs:         FailsafeWatchdog,
+    
 ) -> Tuple[Flask, SocketIO]:
-    global _mav, _tele, _traj, _cmd_front, _cmd_bottom
+    global _mav, _tele, _traj, _cmd_front, _cmd_bottom, _fs
     _mav, _tele, _traj = mav, tele, traj
     _cmd_front, _cmd_bottom = cmd_front, cmd_bottom
+    _fs = fs
 
     app = Flask(__name__)
     CORS(app, resources={r"/api/*": {"origins": "*"}})
@@ -99,6 +107,12 @@ def create_app(
 
     traj.on_trajectory_update = _on_trajectory
     mav.on_message_callback   = tele.handle_message
+    
+    def _has_active_clients():
+        with _clients_lock:
+            return _active_clients > 0
+
+    fs.get_client_connected = _has_active_clients
 
     # ── REST ──────────────────────────────────
     @app.route("/api/status")
@@ -169,11 +183,30 @@ def create_app(
         ok, msg = _send_camera_cmd(cam, "record_stop")
         return jsonify({"camera": cam, "action": "record_stop", "queued": ok, "message": msg}), (200 if ok else 503)
 
+    # ── REST: failsafe ────────────────────────
+    @app.route("/api/failsafe/status")
+    def failsafe_status():
+        """Snapshot health seluruh subsistem. Dipanggil React saat initial load."""
+        return jsonify(_fs.get_status() if _fs else {"error": "failsafe not initialized"})
+ 
+    @app.route("/api/failsafe/events")
+    def failsafe_events():
+        """Riwayat event failsafe (terbaru dulu). Query param: ?limit=50"""
+        limit = int(request.args.get("limit", 50))
+        return jsonify(_fs.get_event_history(limit) if _fs else [])
+
     # ── SocketIO ──────────────────────────────
     @sio.on("connect")
     def on_connect(auth=None):
         logger.info("[Routes] React client terkoneksi")
         # FIX: emit snapshot di background thread agar tidak blocking connect handler
+        # Track jumlah client aktif untuk failsafe dashboard check
+        global _active_clients
+        with _clients_lock:
+            _active_clients += 1
+        # Notify failsafe bahwa dashboard hidup
+        if _fs:
+            _fs.notify_dashboard_active()
         sid = request.sid
         def _emit_initial():
             if _tele: sio.emit("telemetry_update",  _tele.get_state(), to=sid)
@@ -212,10 +245,30 @@ def create_app(
                 ((ch1 - RC_NEUTRAL_PWM) / 500.0) * JOYSTICK_SCALE_MS,
                 ((ch2 - RC_NEUTRAL_PWM) / 500.0) * JOYSTICK_SCALE_MS,
             )
+            
+    @sio.on("cmd_emergency_stop")
+    def on_emergency_stop(data=None):
+        reason = (data or {}).get(
+            "reason",
+            "Operator E-Stop"
+        )
+
+        if _fs:
+            _fs.trigger_emergency_stop(reason)
+            
+    @sio.on("cmd_clear_emergency")
+    def on_clear_emergency(data=None):
+        if _fs:
+            _fs.clear_emergency()
 
     @sio.on("disconnect")
     def on_disconnect():
         logger.info("[Routes] React client disconnect")
+        global _active_clients
+        with _clients_lock:
+            _active_clients = max(0, _active_clients - 1)
+        if _fs:
+            _fs.notify_dashboard_disconnected()
         if _traj: _traj.update_velocity(0.0, 0.0)
 
     return app, sio
@@ -236,12 +289,23 @@ def run_core_server(
     cmd_bottom_queue:    multiprocessing.Queue,
     result_camera_queue: multiprocessing.Queue,
 ):
-    logging.basicConfig(level=logging.INFO)
+    # Inisialisasi logging terpusat untuk proses CoreAPI
+    setup_logging()
     logger.info("[CoreAPI] Proses dimulai")
 
     mav  = MAVLinkBridge()
     tele = TelemetryManager()
     traj = TrajectoryEstimator()
+    
+    # Inisialisasi failsafe watchdog
+    # sio.emit belum ada saat ini — kita defer via lambda
+    # SocketIO instance dibuat di create_app, jadi kita buat proxy emit
+    _sio_proxy = []
+    def _emit_proxy(event, data):
+        if _sio_proxy:
+            _sio_proxy[0].emit(event, data)
+
+    fs = FailsafeWatchdog(mav=mav, tele=tele, sio_emit=_emit_proxy,)
 
     # Connect di background thread agar core API langsung bisa serve request
     # sementara menunggu SITL/Pixhawk siap
@@ -250,7 +314,14 @@ def run_core_server(
             logger.warning("[CoreAPI] MAVLink tidak terhubung")
     threading.Thread(target=_connect_bg, daemon=True, name="MAVLinkConnector").start()
 
-    app, sio = create_app(mav, tele, traj, cmd_front_queue, cmd_bottom_queue)
+    app, sio = create_app(mav, tele, traj, fs, cmd_front_queue, cmd_bottom_queue)
+    
+    # Inject sio nyata ke proxy setelah create_app
+    _sio_proxy.append(sio)
+ 
+    # Start failsafe watchdog
+    fs.start()
+    
     start_queue_drainer(qr_result_queue, dock_event_queue, result_camera_queue)
 
     logger.info(f"[CoreAPI] Server berjalan di port {PORT_CORE_API}")
