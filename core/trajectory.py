@@ -28,6 +28,7 @@ from typing import Deque, Optional
 from config import (
     TRAJECTORY_HISTORY_SIZE,
     TRAJECTORY_UPDATE_INTERVAL,
+    AUTONOMOUS_WAYPOINT_SUBSAMPLE,
 )
 
 logger = logging.getLogger(__name__)
@@ -69,6 +70,13 @@ class TrajectoryEstimator:
 
         # Rate limiting: emit ke React tidak lebih dari 1x per interval
         self._last_emit_time: float = 0.0
+
+        # ──────────────────────────────────────────
+        # Autonomous trajectory snapshot
+        # Di-set saat operator klik "Set Target" sebelum misi
+        # ──────────────────────────────────────────
+        self._replay_waypoints: list = []  # snapshot path untuk replay autonomous
+        self._target_id: str = ""
 
     # ──────────────────────────────────────────
     # Update dari telemetry
@@ -139,6 +147,67 @@ class TrajectoryEstimator:
             self._pos_y = 0.0
             self._path.clear()
         logger.info("[Trajectory] Posisi di-reset ke origin")
+
+    # ──────────────────────────────────────────
+    # Autonomous snapshot methods
+    # ──────────────────────────────────────────
+    def set_target_snapshot(self, target_id: str) -> int:
+        """
+        Dipanggil operator saat ROV sudah berada di dekat target.
+        Menyimpan snapshot jalur rekaman saat ini sebagai waypoints replay.
+        Waypoints disubsample untuk efisiensi (setiap AUTONOMOUS_WAYPOINT_SUBSAMPLE titik).
+        Return: jumlah waypoints yang disimpan.
+        """
+        with self._lock:
+            self._target_id = target_id
+            path_list = list(self._path)
+            # Subsample untuk kurangi jumlah waypoint (hindari overshoot)
+            n = max(1, AUTONOMOUS_WAYPOINT_SUBSAMPLE)
+            self._replay_waypoints = path_list[::n]
+            count = len(self._replay_waypoints)
+        logger.info(
+            f"[Trajectory] Target '{target_id}' snapshot: {count} waypoints "
+            f"(dari {len(path_list)} titik, subsample={n})"
+        )
+        return count
+
+    def get_replay_waypoints(self) -> list:
+        """
+        Return salinan waypoints untuk replay autonomous.
+        Thread-safe — tidak mengubah internal state.
+        """
+        with self._lock:
+            return list(self._replay_waypoints)
+
+    def get_target_id(self) -> str:
+        """Return target_id yang sedang di-snapshot."""
+        with self._lock:
+            return self._target_id
+
+    def clear_target_snapshot(self):
+        """Hapus snapshot setelah misi selesai atau dibatalkan."""
+        with self._lock:
+            self._replay_waypoints.clear()
+            self._target_id = ""
+        logger.info("[Trajectory] Target snapshot dihapus")
+
+    def get_current_pos(self) -> dict:
+        """
+        Shortcut: return posisi estimasi saat ini.
+        Dipakai oleh AutonomousController untuk tracking waypoint.
+        Return: { 'x': float, 'y': float, 'depth': float }
+        """
+        with self._lock:
+            return {
+                "x":     round(self._pos_x, 3),
+                "y":     round(self._pos_y, 3),
+                "depth": round(self._pos_depth, 3),
+            }
+
+    def get_current_yaw(self) -> float:
+        """Return yaw terbaru (derajat). Dipakai autonomous untuk koreksi heading."""
+        with self._lock:
+            return self._yaw
 
     # ──────────────────────────────────────────
     # Getter

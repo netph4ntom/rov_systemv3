@@ -87,11 +87,12 @@ def main():
     manager = multiprocessing.Manager()
     shared_queues = create_shared_queues(manager)
 
-    qr_result_queue     = shared_queues["qr_result"]
-    dock_event_queue    = shared_queues["dock_event"]
-    cmd_front_queue     = shared_queues["cmd_front"]
-    cmd_bottom_queue    = shared_queues["cmd_bottom"]
-    result_camera_queue = shared_queues["result_camera"]
+    qr_result_queue       = shared_queues["qr_result"]
+    qr_front_result_queue = shared_queues["qr_front_result"]
+    dock_event_queue      = shared_queues["dock_event"]
+    cmd_front_queue       = shared_queues["cmd_front"]
+    cmd_bottom_queue      = shared_queues["cmd_bottom"]
+    result_camera_queue   = shared_queues["result_camera"]
 
     # ── Spawn proses ──────────────────────────
     processes_config = [
@@ -99,7 +100,8 @@ def main():
             "name":   "CoreAPI",
             "target": run_core_server,
             "args":   (
-                qr_result_queue, 
+                qr_result_queue,
+                qr_front_result_queue,
                 dock_event_queue,
                 cmd_front_queue,
                 cmd_bottom_queue,
@@ -112,6 +114,7 @@ def main():
             "args":   (
                 cmd_front_queue,
                 result_camera_queue,
+                qr_front_result_queue,
                 ),
         },
         {

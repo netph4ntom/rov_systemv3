@@ -40,6 +40,7 @@ from core.mavlink    import MAVLinkBridge
 from core.telemetry  import TelemetryManager
 from core.trajectory import TrajectoryEstimator
 from core.failsafe   import FailsafeWatchdog
+from core.autonomous import AutonomousController
 from config import (
     PORT_CORE_API,
     PORT_STREAM_FRONT,
@@ -59,6 +60,7 @@ _traj: Optional[TrajectoryEstimator]= None
 _cmd_front:  Optional[multiprocessing.Queue] = None
 _cmd_bottom: Optional[multiprocessing.Queue] = None
 _fs: Optional[FailsafeWatchdog] = None
+_autonomous: Optional[AutonomousController] = None
 
 _active_clients = 0
 _clients_lock = threading.Lock()
@@ -82,12 +84,13 @@ def create_app(
     cmd_front:  multiprocessing.Queue,
     cmd_bottom: multiprocessing.Queue,
     fs:         FailsafeWatchdog,
-    
+    autonomous: AutonomousController,
 ) -> Tuple[Flask, SocketIO]:
-    global _mav, _tele, _traj, _cmd_front, _cmd_bottom, _fs
+    global _mav, _tele, _traj, _cmd_front, _cmd_bottom, _fs, _autonomous
     _mav, _tele, _traj = mav, tele, traj
     _cmd_front, _cmd_bottom = cmd_front, cmd_bottom
     _fs = fs
+    _autonomous = autonomous
 
     app = Flask(__name__)
     CORS(app, resources={r"/api/*": {"origins": "*"}})
@@ -195,6 +198,30 @@ def create_app(
         limit = int(request.args.get("limit", 50))
         return jsonify(_fs.get_event_history(limit) if _fs else [])
 
+    # ── REST: autonomous ──────────────────────
+    @app.route("/api/autonomous/status")
+    def autonomous_status_rest():
+        """Snapshot status misi autonomous saat ini."""
+        return jsonify(_autonomous.get_status() if _autonomous else {"state": "IDLE", "is_active": False})
+
+    @app.route("/api/trajectory/set_target", methods=["POST"])
+    def trajectory_set_target():
+        """
+        Simpan snapshot jalur rekaman sebagai waypoints replay autonomous.
+        Dipanggil operator saat ROV sudah berada dekat target.
+        Body JSON: { "target_id": "TARGET_A" }
+        """
+        body = request.get_json(silent=True) or {}
+        target_id = body.get("target_id", "UNKNOWN")
+        if not _traj:
+            return jsonify({"error": "trajectory not initialized"}), 503
+        count = _traj.set_target_snapshot(target_id)
+        return jsonify({
+            "message":   f"Target '{target_id}' snapshot disimpan",
+            "target_id": target_id,
+            "waypoints": count,
+        })
+
     # ── SocketIO ──────────────────────────────
     @sio.on("connect")
     def on_connect(auth=None):
@@ -261,6 +288,26 @@ def create_app(
         if _fs:
             _fs.clear_emergency()
 
+    @sio.on("cmd_autonomous_start")
+    def on_autonomous_start(data=None):
+        """Mulai misi autonomous. Payload: { target_id: string }"""
+        if not _autonomous:
+            sio.emit("mission_complete", {"success": False, "reason": "Autonomous tidak diinisialisasi"})
+            return
+        target_id = (data or {}).get("target_id", "UNKNOWN")
+        result = _autonomous.start_mission(target_id)
+        if not result["ok"]:
+            sio.emit("mission_complete", {"success": False, "reason": result["reason"]})
+        logger.info(f"[Routes] cmd_autonomous_start target='{target_id}' result={result}")
+
+    @sio.on("cmd_autonomous_stop")
+    def on_autonomous_stop(data=None):
+        """Hentikan misi autonomous secara manual."""
+        if _autonomous:
+            reason = (data or {}).get("reason", "operator_abort")
+            _autonomous.stop_mission(reason)
+            logger.info(f"[Routes] cmd_autonomous_stop: {reason}")
+
     @sio.on("disconnect")
     def on_disconnect():
         logger.info("[Routes] React client disconnect")
@@ -285,11 +332,12 @@ def _store_qr_from_queue(data: dict):
 
 
 def run_core_server(
-    qr_result_queue:     multiprocessing.Queue,
-    dock_event_queue:    multiprocessing.Queue,
-    cmd_front_queue:     multiprocessing.Queue,
-    cmd_bottom_queue:    multiprocessing.Queue,
-    result_camera_queue: multiprocessing.Queue,
+    qr_result_queue:       multiprocessing.Queue,
+    qr_front_result_queue: multiprocessing.Queue,
+    dock_event_queue:      multiprocessing.Queue,
+    cmd_front_queue:       multiprocessing.Queue,
+    cmd_bottom_queue:      multiprocessing.Queue,
+    result_camera_queue:   multiprocessing.Queue,
 ):
     # Inisialisasi logging terpusat untuk proses CoreAPI
     setup_logging()
@@ -298,7 +346,7 @@ def run_core_server(
     mav  = MAVLinkBridge()
     tele = TelemetryManager()
     traj = TrajectoryEstimator()
-    
+
     # Inisialisasi failsafe watchdog
     # sio.emit belum ada saat ini — kita defer via lambda
     # SocketIO instance dibuat di create_app, jadi kita buat proxy emit
@@ -307,7 +355,19 @@ def run_core_server(
         if _sio_proxy:
             _sio_proxy[0].emit(event, data)
 
-    fs = FailsafeWatchdog(mav=mav, tele=tele, sio_emit=_emit_proxy,)
+    fs = FailsafeWatchdog(mav=mav, tele=tele, sio_emit=_emit_proxy)
+
+    # Inisialisasi AutonomousController
+    # sio_emit juga pakai proxy agar tidak terjadi circular dependency
+    autonomous = AutonomousController(
+        mav=mav,
+        tele=tele,
+        traj=traj,
+        fs=fs,
+        sio_emit=_emit_proxy,
+        qr_front_result_queue=qr_front_result_queue,
+        cmd_front_queue=cmd_front_queue,
+    )
 
     # Connect di background thread agar core API langsung bisa serve request
     # sementara menunggu SITL/Pixhawk siap
@@ -316,14 +376,14 @@ def run_core_server(
             logger.warning("[CoreAPI] MAVLink tidak terhubung")
     threading.Thread(target=_connect_bg, daemon=True, name="MAVLinkConnector").start()
 
-    app, sio = create_app(mav, tele, traj, cmd_front_queue, cmd_bottom_queue, fs)
-    
+    app, sio = create_app(mav, tele, traj, cmd_front_queue, cmd_bottom_queue, fs, autonomous)
+
     # Inject sio nyata ke proxy setelah create_app
     _sio_proxy.append(sio)
- 
+
     # Start failsafe watchdog
     fs.start()
-    
+
     start_queue_drainer(qr_result_queue, dock_event_queue, result_camera_queue)
 
     logger.info(f"[CoreAPI] Server berjalan di port {PORT_CORE_API}")

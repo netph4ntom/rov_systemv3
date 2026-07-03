@@ -3,9 +3,10 @@
 #
 # Queue map:
 #
-#   camera_bottom ──(qr_result)────► core → WebSocket → React
-#   camera_bottom ──(dock_event)───► core → WebSocket → React
-#   camera_bottom ──(frame_snapshot)► core (health check / snapshot API)
+#   camera_bottom ──(qr_result)────────► core → WebSocket → React
+#   camera_bottom ──(dock_event)────────► core → WebSocket → React
+#   camera_front  ──(qr_front_result)──► core → AutonomousController (alignment)
+#   camera_bottom ──(frame_snapshot)────► core (health check / snapshot API)
 #
 # Note: MAVLink, telemetry, dan trajectory TIDAK menggunakan multiprocessing queue
 # karena semuanya berjalan dalam satu proses "core" yang sama.
@@ -23,8 +24,11 @@ def create_shared_queues(manager: Any) -> dict[str, Any]:
     Dipanggil sekali di main.py lalu di-pass ke masing-masing proses.
     """
     return {
-        # Hasil decode QR code: camera_bottom → core
+        # Hasil decode QR code dari kamera bawah: camera_bottom → core → React
         "qr_result": manager.Queue(maxsize=QUEUE_MAXSIZE),
+
+        # Hasil decode QR code dari kamera depan: camera_front → core (autonomous alignment)
+        "qr_front_result": manager.Queue(maxsize=QUEUE_MAXSIZE),
 
         # Event docking (aligned / lost): camera_bottom → core
         "dock_event": manager.Queue(maxsize=QUEUE_MAXSIZE),

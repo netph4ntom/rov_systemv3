@@ -32,6 +32,7 @@ from camera_front.camera           import FrontCamera
 from camera_front.image_processing import FrontImageProcessor
 from camera_front.record           import FrontRecorder
 from camera_front.screenshot       import FrontScreenshot
+from camera_front.qr_detector      import QRDetector
 from typing import Optional
 from config import PORT_STREAM_FRONT, MJPEG_QUALITY, FRAME_FPS
 
@@ -145,9 +146,10 @@ _camera    :Optional[FrontCamera]          = None
 _processor :Optional[FrontImageProcessor] = None
 _recorder  :Optional[FrontRecorder]       = None
 _screenshotter:Optional[FrontScreenshot]  = None
+_qr_detector  :Optional[QRDetector]       = None
 
 # Queue references (di-set oleh run_front_stream_server)
-_cmd_queue:Optional[multiprocessing.Queue] = None
+_cmd_queue:Optional[multiprocessing.Queue]    = None
 _result_queue:Optional[multiprocessing.Queue] = None
 
 # Frame terbaru (RAW, sebelum processor overlay) untuk screenshot
@@ -177,6 +179,10 @@ def _capture_loop():
 
         # Frame dengan HUD untuk stream
         display = _processor.process(frame.copy())
+
+        # QR overlay (hanya saat detektor aktif untuk autonomous alignment)
+        if _qr_detector and _qr_detector.is_active:
+            display = _qr_detector.process_frame(display)
 
         with _frame_lock:
             _raw_frame     = raw
@@ -214,6 +220,14 @@ def _handle_commands():
     elif action == "record_stop":
         filepath = _recorder.stop()
         _send_result(action, filepath)
+
+    elif action == "qr_activate":
+        if _qr_detector:
+            _qr_detector.activate()
+
+    elif action == "qr_deactivate":
+        if _qr_detector:
+            _qr_detector.deactivate()
 
     else:
         logger.warning(f"[FrontStream] Unknown command: {action}")
@@ -291,8 +305,9 @@ def health():
 def run_front_stream_server(
     cmd_queue:    multiprocessing.Queue,
     result_queue: multiprocessing.Queue,
+    qr_front_result_queue: Optional[multiprocessing.Queue] = None,
 ):
-    global _camera, _processor, _recorder, _screenshotter
+    global _camera, _processor, _recorder, _screenshotter, _qr_detector
     global _cmd_queue, _result_queue
 
     logging.basicConfig(level=logging.INFO)
@@ -301,10 +316,11 @@ def run_front_stream_server(
     _cmd_queue    = cmd_queue
     _result_queue = result_queue
 
-    _camera       = FrontCamera()
-    _processor    = FrontImageProcessor(show_hud=True)
-    _recorder     = FrontRecorder()
+    _camera        = FrontCamera()
+    _processor     = FrontImageProcessor(show_hud=True)
+    _recorder      = FrontRecorder()
     _screenshotter = FrontScreenshot()
+    _qr_detector   = QRDetector(result_queue=qr_front_result_queue)
 
     threading.Thread(
         target=_capture_loop,

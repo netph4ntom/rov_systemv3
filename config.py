@@ -113,3 +113,42 @@ FS_RAM_WARN_PERCENT  = 85.0   # persen
 FS_TEMP_WARN_CELSIUS = 70.0   # derajat Celsius
 
 FS_MAX_RECOVERY_ATTEMPTS = 3
+
+# ──────────────────────────────────────────────
+# AUTONOMOUS MISSION — Trajectory Replay
+# ──────────────────────────────────────────────
+# ArduSub Standard RC Channel Mapping:
+#   CH1 = Lateral / Strafe (Roll)     → vel_x  (kanan positif)
+#   CH2 = Forward / Backward (Pitch)  → vel_y  (maju positif)
+#   CH3 = Throttle / Vertical
+#   CH4 = Yaw (rotasi kanan positif)
+AUTONOMOUS_RC_CH_LATERAL  = 1
+AUTONOMOUS_RC_CH_FORWARD  = 2
+AUTONOMOUS_RC_CH_THROTTLE = 3
+AUTONOMOUS_RC_CH_YAW      = 4
+
+# Trajectory Replay — toleransi dan kecepatan
+AUTONOMOUS_WAYPOINT_REACH_THRESHOLD_M  = 0.20  # meter — waypoint dianggap tercapai
+AUTONOMOUS_WAYPOINT_SKIP_THRESHOLD_M   = 0.50  # meter — skip waypoint jika estimasi drift terlalu jauh
+AUTONOMOUS_WAYPOINT_TIMEOUT_S          = 8.0   # detik maks per waypoint sebelum skip
+AUTONOMOUS_REPLAY_SPEED_PWM            = 1580  # PWM forward saat replay (maju ke target)
+AUTONOMOUS_RETURN_SPEED_PWM            = 1580  # PWM forward saat return (balik ke docking, ROV berbalik arah)
+AUTONOMOUS_KP_YAW                      = 3.0   # gain koreksi yaw: derajat error → PWM delta
+AUTONOMOUS_MAX_YAW_CORRECTION          = 350   # maks delta PWM untuk koreksi yaw
+AUTONOMOUS_LOOP_HZ                     = 10    # iterasi kontrol per detik (100ms/loop)
+
+# QR Fine-Alignment
+AUTONOMOUS_ALIGN_THRESHOLD_PX          = 30    # piksel — |offset_x| dan |offset_y| < nilai ini = aligned
+AUTONOMOUS_ALIGN_TIMEOUT_S             = 25.0  # detik maks fase alignment sebelum abort
+AUTONOMOUS_KP_ALIGN_LATERAL            = 0.60  # gain: offset_x (px) → CH1 (lateral correction)
+AUTONOMOUS_KP_ALIGN_YAW               = 0.35  # gain: offset_x (px) → CH4 (yaw assist)
+AUTONOMOUS_MAX_ALIGN_CORRECTION        = 180   # maks delta PWM saat alignment
+
+# Pickup sequence
+AUTONOMOUS_PICKUP_ADVANCE_S            = 0.8   # detik maju perlahan setelah gripper terbuka
+AUTONOMOUS_GRIPPER_WAIT_S             = 1.2   # detik tunggu setelah perintah gripper (buka/tutup)
+AUTONOMOUS_STOP_WAIT_S               = 0.5   # detik tunggu motor berhenti sebelum gripper
+
+# Thinning waypoints untuk mengurangi overshoot di trajektori rekaman
+# Ambil 1 dari N waypoint (subsample) — 1 = gunakan semua
+AUTONOMOUS_WAYPOINT_SUBSAMPLE         = 3     # ambil setiap waypoint ke-3
