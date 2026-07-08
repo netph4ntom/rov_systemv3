@@ -34,8 +34,9 @@ def test_environment():
         ("pyzbar", "Classic QR Scanner"),
         ("psutil", "System Failsafe Monitoring"),
         ("aiortc", "WebRTC Video Stream"),
-        ("flask", "Flask Server"),
-        ("flask_socketio", "WebSocket Engine"),
+        ("fastapi", "FastAPI Framework"),
+        ("uvicorn", "ASGI Uvicorn Server"),
+        ("zmq", "ZeroMQ IPC Library"),
     ]
 
     for module_name, desc in dependencies:

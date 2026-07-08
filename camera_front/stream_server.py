@@ -1,48 +1,74 @@
 # camera_front/stream_server.py
-# MJPEG streaming server untuk kamera depan.
-# Update: sekarang juga consume cmd_queue untuk screenshot & recording.
+# MJPEG streaming server untuk kamera depan menggunakan FastAPI & ZMQ.
 #
 # Thread model:
-#   - Thread: Flask HTTP server (MJPEG /stream, /health)
-#   - Thread: capture_loop → baca frame, jalankan processor, handle cmd_queue
-#
-# Command queue (dari core via shared_queue):
-#   { "action": "screenshot" }
-#   { "action": "record_start" }
-#   { "action": "record_stop" }
-#
-# Result queue (ke core):
-#   { "camera": "front", "action": "screenshot", "status": "ok", "filepath": "..." }
-#   { "camera": "front", "action": "record_start", "status": "ok", "filepath": "..." }
-#   { "camera": "front", "action": "record_stop",  "status": "ok", "filepath": "..." }
+#   - ASGI Event Loop: WebRTC negosiasi (/offer), health check (/health)
+#   - Thread: capture_loop → baca frame, jalankan processor
+#   - Thread: command_loop → baca dari ZMQ PULL socket, jalankan aksi (screenshot, record)
 
 import cv2
 import threading
 import logging
-import multiprocessing
 import asyncio
-from flask import Flask, Response, jsonify, request
-from flask_cors import CORS
+import json
+import time
+import zmq
+from fastapi import FastAPI, Request, Response
+from fastapi.responses import StreamingResponse, JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
 
 # WebRTC imports
 from aiortc import RTCPeerConnection, RTCSessionDescription, MediaStreamTrack
 import av
 
-from camera_front.camera           import FrontCamera
+from camera_front.camera import FrontCamera
 from camera_front.image_processing import FrontImageProcessor
-from camera_front.record           import FrontRecorder
-from camera_front.screenshot       import FrontScreenshot
-from camera_front.qr_detector      import QRDetector
-from typing import Optional
-from config import PORT_STREAM_FRONT, MJPEG_QUALITY, FRAME_FPS
+from camera_front.record import FrontRecorder
+from camera_front.screenshot import FrontScreenshot
+from camera_front.qr_detector import QRDetector
+from typing import Optional, Any
+from config import (
+    PORT_STREAM_FRONT,
+    MJPEG_QUALITY,
+    FRAME_FPS,
+    ZMQ_PORT_FRONT_PUB,
+    ZMQ_PORT_FRONT_CMD,
+)
 
 logger = logging.getLogger(__name__)
-app = Flask(__name__)
-CORS(app)
+app = FastAPI(title="Front Camera Stream Server")
 
-# WebRTC global state
-_async_loop = None
+# Setup CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 _pcs = set()
+
+
+class ZmqQueueWrapper:
+    """
+    Queue-like wrapper that publishes elements via a ZMQ PUB socket.
+    Allows QRDetector and other components to put messages without code changes.
+    """
+    def __init__(self, pub_socket: zmq.Socket, topic: str):
+        self.pub_socket = pub_socket
+        self.topic = topic
+        self._lock = threading.Lock()
+
+    def put_nowait(self, item: Any):
+        try:
+            with self._lock:
+                self.pub_socket.send_multipart([
+                    self.topic.encode('utf-8'),
+                    json.dumps(item).encode('utf-8')
+                ])
+        except Exception as e:
+            logger.error(f"[ZmqQueueWrapper] Error sending on topic {self.topic}: {e}")
 
 
 class CameraVideoTrack(MediaStreamTrack):
@@ -61,11 +87,9 @@ class CameraVideoTrack(MediaStreamTrack):
         # Get frame
         frame = self.get_frame_fn()
         if frame is None:
-            # If no frame, sleep briefly and retry
             await asyncio.sleep(0.01)
             frame = self.get_frame_fn()
             if frame is None:
-                # Still no frame, send blank frame to avoid error
                 import numpy as np
                 frame = np.zeros((480, 640, 3), dtype=np.uint8)
 
@@ -78,17 +102,6 @@ class CameraVideoTrack(MediaStreamTrack):
         await asyncio.sleep(1 / FRAME_FPS)
 
         return video_frame
-
-
-def _start_async_loop():
-    global _async_loop
-    _async_loop = asyncio.new_event_loop()
-    t = threading.Thread(
-        target=_async_loop.run_forever,
-        daemon=True,
-        name="FrontAsyncLoop"
-    )
-    t.start()
 
 
 async def _negotiate_async(params):
@@ -124,142 +137,134 @@ async def _negotiate_async(params):
     }
 
 
-@app.route("/offer", methods=["POST"])
-def offer():
-    params = request.json
+@app.post("/offer")
+async def offer(request: Request):
+    params = await request.json()
     if not params or "sdp" not in params or "type" not in params:
-        return jsonify({"error": "Missing sdp or type in request"}), 400
+        return JSONResponse(status_code=400, content={"error": "Missing sdp or type in request"})
 
-    # Submit task to the running asyncio loop in the background thread
-    coro = _negotiate_async(params)
-    future = asyncio.run_coroutine_threadsafe(coro, _async_loop)
     try:
-        # Wait for the negotiation to complete (timeout after 10s)
-        answer = future.result(timeout=10.0)
-        return jsonify(answer)
+        answer = await _negotiate_async(params)
+        return answer
     except Exception as e:
         logger.exception("[WebRTC] Gagal negosiasi WebRTC")
-        return jsonify({"error": str(e)}), 500
+        return JSONResponse(status_code=500, content={"error": str(e)})
 
 
-_camera    :Optional[FrontCamera]          = None
-_processor :Optional[FrontImageProcessor] = None
-_recorder  :Optional[FrontRecorder]       = None
-_screenshotter:Optional[FrontScreenshot]  = None
-_qr_detector  :Optional[QRDetector]       = None
+_camera: Optional[FrontCamera] = None
+_processor: Optional[FrontImageProcessor] = None
+_recorder: Optional[FrontRecorder] = None
+_screenshotter: Optional[FrontScreenshot] = None
+_qr_detector: Optional[QRDetector] = None
 
-# Queue references (di-set oleh run_front_stream_server)
-_cmd_queue:Optional[multiprocessing.Queue]    = None
-_result_queue:Optional[multiprocessing.Queue] = None
+# ZMQ socket references
+_zmq_ctx: Optional[zmq.Context] = None
+_zmq_pub: Optional[zmq.Socket] = None
+_zmq_pull_cmd: Optional[zmq.Socket] = None
 
-# Frame terbaru (RAW, sebelum processor overlay) untuk screenshot
-# Frame processed untuk MJPEG stream
-_raw_frame     = None
+# Wrapper for sending command results via ZMQ
+_result_queue: Optional[ZmqQueueWrapper] = None
+
+_raw_frame = None
 _display_frame = None
-_frame_lock    = threading.Lock()
+_frame_lock = threading.Lock()
 
 
-# ──────────────────────────────────────────────
-# Capture loop (background thread)
-# ──────────────────────────────────────────────
 def _capture_loop():
-    """
-    Baca kamera tiap iterasi, proses frame, handle command queue.
-    Berjalan di background thread agar tidak blocking Flask.
-    """
     global _raw_frame, _display_frame
 
     while True:
-        ret, frame = _camera.read_frame()
-        if not ret or frame is None:
+        if _camera is None or _processor is None:
+            time.sleep(0.1)
             continue
 
-        # Simpan raw frame untuk screenshot (tanpa HUD overlay)
+        ret, frame = _camera.read_frame()
+        if not ret or frame is None:
+            time.sleep(0.01)
+            continue
+
         raw = frame.copy()
+
+        # Jalankan deteksi QR sebelum overlay
+        if _qr_detector is not None and getattr(_qr_detector, "active", True):
+            _qr_detector.process_frame(raw, _processor)
 
         # Frame dengan HUD untuk stream
         display = _processor.process(frame.copy())
 
-        # QR overlay (hanya saat detektor aktif untuk autonomous alignment)
-        if _qr_detector and _qr_detector.is_active:
-            display = _qr_detector.process_frame(display)
-
         with _frame_lock:
-            _raw_frame     = raw
+            _raw_frame = raw
             _display_frame = display
 
-        # Tulis ke recorder jika sedang recording (pakai raw frame)
-        _recorder.write(raw)
-
-        # Proses command dari core (non-blocking)
-        _handle_commands()
+        # Tulis ke recorder jika sedang recording
+        if _recorder is not None:
+            _recorder.write(raw)
 
 
-def _handle_commands():
-    """Drain cmd_queue secara non-blocking dan eksekusi perintah."""
-    if _cmd_queue is None:
-        return
-    try:
-        cmd = _cmd_queue.get_nowait()
-    except Exception:
-        return  # queue kosong, normal
+def _zmq_command_loop():
+    """Background thread to pull ZMQ commands and execute them."""
+    while True:
+        try:
+            if _zmq_pull_cmd is None:
+                time.sleep(0.5)
+                continue
 
-    action = cmd.get("action", "")
-    logger.info(f"[FrontStream] Command diterima: {action}")
+            cmd = _zmq_pull_cmd.recv_json()
+            action = cmd.get("action", "")
+            logger.info(f"[FrontStream] Command diterima via ZMQ: {action}")
 
-    if action == "screenshot":
-        with _frame_lock:
-            frame = _raw_frame.copy() if _raw_frame is not None else None
-        filepath = _screenshotter.take(frame)
-        _send_result(action, filepath)
+            if action == "screenshot":
+                with _frame_lock:
+                    frame = _raw_frame.copy() if _raw_frame is not None else None
+                filepath = _screenshotter.take(frame)
+                _send_result(action, filepath)
 
-    elif action == "record_start":
-        filepath = _recorder.start()
-        _send_result(action, filepath)
+            elif action == "record_start":
+                filepath = _recorder.start()
+                _send_result(action, filepath)
 
-    elif action == "record_stop":
-        filepath = _recorder.stop()
-        _send_result(action, filepath)
+            elif action == "record_stop":
+                filepath = _recorder.stop()
+                _send_result(action, filepath)
 
-    elif action == "qr_activate":
-        if _qr_detector:
-            _qr_detector.activate()
+            elif action == "qr_activate":
+                if _qr_detector is not None:
+                    _qr_detector.active = True
+                    logger.info("[FrontStream] QR detector diaktifkan")
 
-    elif action == "qr_deactivate":
-        if _qr_detector:
-            _qr_detector.deactivate()
+            elif action == "qr_deactivate":
+                if _qr_detector is not None:
+                    _qr_detector.active = False
+                    logger.info("[FrontStream] QR detector dinonaktifkan")
 
-    else:
-        logger.warning(f"[FrontStream] Unknown command: {action}")
+            else:
+                logger.warning(f"[FrontStream] Unknown command: {action}")
+        except Exception as e:
+            logger.error(f"[FrontStream] Error di ZMQ command loop: {e}")
+            time.sleep(0.1)
 
 
-def _send_result(action: str, filepath:Optional[str]):
-    """Kirim hasil command ke result_queue untuk di-forward ke React oleh core."""
+def _send_result(action: str, filepath: Optional[str]):
     if _result_queue is None:
         return
     status = "ok" if filepath else "error"
     payload = {
-        "camera":   "front",
-        "action":   action,
-        "status":   status,
+        "camera": "front",
+        "action": action,
+        "status": status,
         "filepath": filepath or "",
         "filename": filepath.split("/")[-1] if filepath else "",
     }
-    try:
-        _result_queue.put_nowait(payload)
-    except Exception:
-        logger.warning("[FrontStream] result_queue penuh, result dibuang")
+    _result_queue.put_nowait(payload)
 
 
-# ──────────────────────────────────────────────
-# MJPEG generator
-# ──────────────────────────────────────────────
 def _generate_frames():
     while True:
         with _frame_lock:
             frame = _display_frame
 
         if frame is None:
+            time.sleep(0.03)
             continue
 
         ret, buffer = cv2.imencode(
@@ -277,70 +282,73 @@ def _generate_frames():
         )
 
 
-# ──────────────────────────────────────────────
-# Flask routes
-# ──────────────────────────────────────────────
-@app.route("/stream")
-def stream():
-    return Response(
+@app.get("/stream")
+async def stream():
+    return StreamingResponse(
         _generate_frames(),
-        mimetype="multipart/x-mixed-replace; boundary=frame"
+        media_type="multipart/x-mixed-replace; boundary=frame"
     )
 
 
-@app.route("/health")
-def health():
+@app.get("/health")
+async def health():
     cam_ok = bool(_camera and _camera.cap and _camera.cap.isOpened())
-    return jsonify({
-        "camera":      "front",
-        "status":      "ok" if cam_ok else "error",
-        "recording":   _recorder.is_recording if _recorder else False,
+    return {
+        "camera": "front",
+        "status": "ok" if cam_ok else "error",
+        "recording": _recorder.is_recording if _recorder else False,
         "record_file": _recorder.get_current_filepath() if _recorder else None,
-    })
+    }
 
 
-# ──────────────────────────────────────────────
-# Entry point
-# ──────────────────────────────────────────────
-def run_front_stream_server(
-    cmd_queue:    multiprocessing.Queue,
-    result_queue: multiprocessing.Queue,
-    qr_front_result_queue: Optional[multiprocessing.Queue] = None,
-):
+def run_front_stream_server():
     global _camera, _processor, _recorder, _screenshotter, _qr_detector
-    global _cmd_queue, _result_queue
+    global _zmq_ctx, _zmq_pub, _zmq_pull_cmd, _result_queue
 
     logging.basicConfig(level=logging.INFO)
     logger.info("[FrontStream] Proses dimulai")
 
-    _cmd_queue    = cmd_queue
-    _result_queue = result_queue
+    # Inisialisasi ZMQ sockets (Kamera mengikat PUB port, menghubungkan ke PULL port)
+    _zmq_ctx = zmq.Context()
+    
+    # PUB socket untuk mengirim event QR dan camera command results
+    _zmq_pub = _zmq_ctx.socket(zmq.PUB)
+    _zmq_pub.bind(f"tcp://127.0.0.1:{ZMQ_PORT_FRONT_PUB}")
+    logger.info(f"[FrontStream] ZMQ PUB Bound to {ZMQ_PORT_FRONT_PUB}")
 
-    _camera        = FrontCamera()
-    _processor     = FrontImageProcessor(show_hud=True)
-    _recorder      = FrontRecorder()
+    # PULL socket untuk menerima command screenshot/record dari core
+    _zmq_pull_cmd = _zmq_ctx.socket(zmq.PULL)
+    _zmq_pull_cmd.connect(f"tcp://127.0.0.1:{ZMQ_PORT_FRONT_CMD}")
+    logger.info(f"[FrontStream] ZMQ PULL Connected to {ZMQ_PORT_FRONT_CMD}")
+
+    # Buat queue wrappers yang meneruskan pesan ke ZMQ PUB
+    qr_front_result_zmq = ZmqQueueWrapper(_zmq_pub, "qr_front_result")
+    _result_queue = ZmqQueueWrapper(_zmq_pub, "camera_result")
+
+    _camera = FrontCamera()
+    _processor = FrontImageProcessor(show_hud=True)
+    _recorder = FrontRecorder()
     _screenshotter = FrontScreenshot()
-    _qr_detector   = QRDetector(result_queue=qr_front_result_queue)
+    _qr_detector = QRDetector(result_queue=qr_front_result_zmq)
 
+    # Start capture thread
     threading.Thread(
         target=_capture_loop,
         daemon=True,
         name="FrontCaptureThread"
     ).start()
 
-    # Mulai thread background asyncio loop untuk WebRTC
-    _start_async_loop()
+    # Start ZMQ command listener thread
+    threading.Thread(
+        target=_zmq_command_loop,
+        daemon=True,
+        name="FrontZmqCmdThread"
+    ).start()
 
     logger.info(f"[FrontStream] WebRTC + MJPEG server berjalan di port {PORT_STREAM_FRONT}")
-    app.run(
-        host="0.0.0.0",
-        port=PORT_STREAM_FRONT,
-        threaded=True,
-        use_reloader=False
-    )
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=PORT_STREAM_FRONT, log_level="warning")
 
 
 if __name__ == "__main__":
-    # Dummy queue untuk run standalone (testing)
-    mgr = multiprocessing.Manager()
-    run_front_stream_server(mgr.Queue(), mgr.Queue())
+    run_front_stream_server()

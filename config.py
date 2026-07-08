@@ -89,6 +89,15 @@ MAVLINK_BAUD               = int(os.getenv("MAVLINK_BAUD", "115200"))
 MAVLINK_SOURCE_SYSTEM      = 255       # GCS system ID
 MAVLINK_HEARTBEAT_INTERVAL = 1.0      # detik antar heartbeat
 
+# ──────────────────────────────────────────────
+# ZEROMQ IPC PORTS
+# ──────────────────────────────────────────────
+ZMQ_PORT_BOTTOM_PUB = 5555  # Bottom camera publishes events
+ZMQ_PORT_FRONT_PUB  = 5556  # Front camera publishes events
+ZMQ_PORT_BOTTOM_CMD = 5557  # Core pushes commands to bottom camera
+ZMQ_PORT_FRONT_CMD  = 5558  # Core pushes commands to front camera
+
+
 
 # ──────────────────────────────────────────────
 # SERVO

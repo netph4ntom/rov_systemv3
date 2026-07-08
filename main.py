@@ -34,7 +34,6 @@ import logging
 import multiprocessing
 import signal
 
-from shared_queue import create_shared_queues
 from core.routes import run_core_server
 from camera_front.stream_server import run_front_stream_server
 from camera_bottom.stream_server import run_bottom_stream_server
@@ -83,49 +82,22 @@ def main():
 
     log_startup(version="1.0.0")
 
-    # Buat shared Manager dan queues
-    manager = multiprocessing.Manager()
-    shared_queues = create_shared_queues(manager)
-
-    qr_result_queue       = shared_queues["qr_result"]
-    qr_front_result_queue = shared_queues["qr_front_result"]
-    dock_event_queue      = shared_queues["dock_event"]
-    cmd_front_queue       = shared_queues["cmd_front"]
-    cmd_bottom_queue      = shared_queues["cmd_bottom"]
-    result_camera_queue   = shared_queues["result_camera"]
-
     # ── Spawn proses ──────────────────────────
     processes_config = [
         {
             "name":   "CoreAPI",
             "target": run_core_server,
-            "args":   (
-                qr_result_queue,
-                qr_front_result_queue,
-                dock_event_queue,
-                cmd_front_queue,
-                cmd_bottom_queue,
-                result_camera_queue,
-                ),
+            "args":   (),
         },
         {
             "name":   "CameraFront",
             "target": run_front_stream_server,
-            "args":   (
-                cmd_front_queue,
-                result_camera_queue,
-                qr_front_result_queue,
-                ),
+            "args":   (),
         },
         {
             "name":   "CameraBottom",
             "target": run_bottom_stream_server,
-            "args":   (
-                qr_result_queue,
-                dock_event_queue,
-                cmd_bottom_queue,
-                result_camera_queue,
-            ),
+            "args":   (),
         },
     ]
 

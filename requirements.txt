@@ -7,14 +7,14 @@ numpy>=1.24.0               # array operasi
 pyzbar                      # QR code / barcode scanner
 
 # ── Web Server / API ───────────────────────────
-flask>=3.0.0                # REST API + MJPEG server
-flask-socketio>=5.3.6       # WebSocket (SocketIO) untuk push ke React
-flask-cors>=4.0.0           # Cross-Origin Resource Sharing untuk React dev server
-python-socketio>=5.10.0     # SocketIO backend
-python-engineio>=4.9.0      # Engine.IO transport layer
+fastapi>=0.100.0             # Async REST API framework
+uvicorn[standard]>=0.22.0    # ASGI server for FastAPI/Socket.IO
+python-socketio>=5.10.0      # Socket.IO backend for python
+python-engineio>=4.9.0       # Engine.IO transport layer
 
 # ── Async / Networking ─────────────────────────
-eventlet>=0.35.0            # async mode untuk flask-socketio (alternatif: gevent)
+pyzmq>=25.0.0                # ZeroMQ for high-performance IPC
+
 
 # ── Utilities ─────────────────────────────────
 pymavlink>=2.4.40              # MAVLink komunikasi dengan UART
