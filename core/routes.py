@@ -125,6 +125,14 @@ def create_app(
 
     fastapi_app = FastAPI(title="ROV Core API")
 
+    @fastapi_app.on_event("startup")
+    async def startup_event():
+        global _loop
+        _loop = asyncio.get_event_loop()
+        logger.info(f"[CoreAPI] FastAPI startup: event loop captured: {_loop}")
+        # Start ZMQ background listener in the active event loop
+        start_zmq_listener(ZMQ_PORT_BOTTOM_PUB, ZMQ_PORT_FRONT_PUB)
+
     # Setup CORS middleware
     fastapi_app.add_middleware(
         CORSMiddleware,
@@ -413,8 +421,7 @@ def run_core_server():
     # Start failsafe watchdog
     fs.start()
 
-    # Start ZMQ background listener
-    start_zmq_listener(ZMQ_PORT_BOTTOM_PUB, ZMQ_PORT_FRONT_PUB)
+    # Note: ZMQ background listener starts on fastapi_app startup event to share the active event loop.
 
     logger.info(f"[CoreAPI] Uvicorn/ASGI Server berjalan di port {PORT_CORE_API}")
     import uvicorn
