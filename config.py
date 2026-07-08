@@ -11,7 +11,7 @@ FRAME_WIDTH   = 640
 FRAME_HEIGHT  = 480
 FRAME_FPS     = 20
 
-MJPEG_QUALITY = 80                # kualitas JPEG 1–100 (makin kecil makin ringan)
+MJPEG_QUALITY = 60                # kualitas JPEG 1–100 (makin kecil makin ringan)
 
 # ------------------------------------------------
 # IMAGE PROCESSING
@@ -57,6 +57,22 @@ QUEUE_MAXSIZE = 10
 # QR CODE / DOCKING
 # ──────────────────────────────────────────────
 QR_SCAN_INTERVAL_MS = 200         # scan QR setiap N ms (kurangi beban CPU)
+
+# WeChat QR Code Detector model configurations
+import os
+WECHAT_QR_MODEL_DIR = os.path.join(os.path.dirname(__file__), "core", "wechat_models")
+WECHAT_QR_DETECT_PROTOTXT = os.path.join(WECHAT_QR_MODEL_DIR, "detect.prototxt")
+WECHAT_QR_DETECT_CAFFEMODEL = os.path.join(WECHAT_QR_MODEL_DIR, "detect.caffemodel")
+WECHAT_QR_SR_PROTOTXT = os.path.join(WECHAT_QR_MODEL_DIR, "sr.prototxt")
+WECHAT_QR_SR_CAFFEMODEL = os.path.join(WECHAT_QR_MODEL_DIR, "sr.caffemodel")
+
+# URLs to download WeChat QR models if missing
+WECHAT_QR_MODEL_URLS = {
+    "detect.prototxt": "https://raw.githubusercontent.com/WeChatCV/opencv_3rdparty/wechat_qrcode/detect.prototxt",
+    "detect.caffemodel": "https://raw.githubusercontent.com/WeChatCV/opencv_3rdparty/wechat_qrcode/detect.caffemodel",
+    "sr.prototxt": "https://raw.githubusercontent.com/WeChatCV/opencv_3rdparty/wechat_qrcode/sr.prototxt",
+    "sr.caffemodel": "https://raw.githubusercontent.com/WeChatCV/opencv_3rdparty/wechat_qrcode/sr.caffemodel"
+}
 
 # ──────────────────────────────────────────────
 # LOGGING

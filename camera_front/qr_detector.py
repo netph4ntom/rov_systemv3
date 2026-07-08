@@ -23,7 +23,14 @@ try:
 except ImportError:
     _PYZBAR_OK = False
 
-from config import AUTONOMOUS_ALIGN_THRESHOLD_PX
+from config import (
+    AUTONOMOUS_ALIGN_THRESHOLD_PX,
+    WECHAT_QR_DETECT_PROTOTXT,
+    WECHAT_QR_DETECT_CAFFEMODEL,
+    WECHAT_QR_SR_PROTOTXT,
+    WECHAT_QR_SR_CAFFEMODEL,
+)
+from core.wechat_model_downloader import ensure_wechat_models
 
 logger = logging.getLogger(__name__)
 
@@ -46,7 +53,30 @@ class QRDetector:
         self._last_send_time = 0.0
         self._SEND_INTERVAL  = 0.1
         if not _PYZBAR_OK:
-            logger.error("[QRDetector-Front] pyzbar tidak dapat diimport.")
+            logger.warning("[QRDetector-Front] pyzbar tidak dapat diimport.")
+
+        # Inisialisasi WeChat QR Code detector
+        self.wechat_detector = None
+        self._init_wechat_detector()
+
+    def _init_wechat_detector(self):
+        try:
+            if ensure_wechat_models():
+                if hasattr(cv2, "wechat_qrcode_WeChatQRCode"):
+                    self.wechat_detector = cv2.wechat_qrcode_WeChatQRCode(
+                        WECHAT_QR_DETECT_PROTOTXT,
+                        WECHAT_QR_DETECT_CAFFEMODEL,
+                        WECHAT_QR_SR_PROTOTXT,
+                        WECHAT_QR_SR_CAFFEMODEL
+                    )
+                    logger.info("[QRDetector-Front] WeChat QR Code Detector berhasil diinisialisasi.")
+                else:
+                    logger.warning("[QRDetector-Front] Modul WeChatQRCode tidak tersedia di OpenCV. Menggunakan pyzbar.")
+            else:
+                logger.warning("[QRDetector-Front] Gagal mengunduh model WeChat QR. Menggunakan pyzbar.")
+        except Exception as e:
+            logger.error(f"[QRDetector-Front] Gagal inisialisasi WeChat QR: {e}. Menggunakan pyzbar.")
+
 
     def activate(self):
         with self._lock:
@@ -66,45 +96,78 @@ class QRDetector:
             return self._active
 
     def process_frame(self, frame):
-        if not self._active or not _PYZBAR_OK or frame is None:
+        if not self._active or frame is None:
             return frame
+        if self.wechat_detector is None and not _PYZBAR_OK:
+            return frame
+
         h, w = frame.shape[:2]
         cx, cy = w // 2, h // 2
         frame = frame.copy()
         cv2.line(frame, (cx - 25, cy), (cx + 25, cy), (0, 255, 255), 1)
         cv2.line(frame, (cx, cy - 25), (cx, cy + 25), (0, 255, 255), 1)
         cv2.circle(frame, (cx, cy), AUTONOMOUS_ALIGN_THRESHOLD_PX, (0, 255, 255), 1)
-        decoded = pyzbar.decode(frame)
-        if not decoded:
+
+        qr_data = None
+        pts = None
+
+        # 1. Coba WeChat QR Detector jika tersedia
+        if self.wechat_detector is not None:
+            try:
+                res, points = self.wechat_detector.detectAndDecode(frame)
+                if res and len(res) > 0 and len(points) > 0:
+                    qr_data = res[0]
+                    pts = np.array(points[0], dtype=np.int32)  # shape (4, 2)
+            except Exception as e:
+                logger.error(f"[QRDetector-Front] WeChat decode error: {e}")
+
+        # 2. Fallback ke pyzbar jika WeChat gagal atau tidak tersedia
+        if qr_data is None and _PYZBAR_OK:
+            try:
+                decoded = pyzbar.decode(frame)
+                if decoded:
+                    qr = max(decoded, key=lambda q: q.rect.width * q.rect.height)
+                    qr_data = qr.data.decode("utf-8", errors="replace")
+                    rect = qr.rect
+                    pts = np.array([[rect.left, rect.top],
+                                    [rect.left + rect.width, rect.top],
+                                    [rect.left + rect.width, rect.top + rect.height],
+                                    [rect.left, rect.top + rect.height]], dtype=np.int32)
+            except Exception as e:
+                logger.error(f"[QRDetector-Front] pyzbar decode error: {e}")
+
+        if qr_data is None or pts is None:
             cv2.putText(frame, "SEARCHING QR...", (8, h - 10),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 200, 200), 1)
             with self._lock:
                 self._latest_result = None
             return frame
-        qr = max(decoded, key=lambda q: q.rect.width * q.rect.height)
-        data = qr.data.decode("utf-8", errors="replace")
-        rect = qr.rect
-        qr_cx = rect.left + rect.width  // 2
-        qr_cy = rect.top  + rect.height // 2
+
+        # Hitung center dari pts
+        qr_cx = int(np.mean(pts[:, 0]))
+        qr_cy = int(np.mean(pts[:, 1]))
         offset_x = float(qr_cx - cx)
         offset_y = float(qr_cy - cy)
         aligned = (abs(offset_x) < AUTONOMOUS_ALIGN_THRESHOLD_PX and
                    abs(offset_y) < AUTONOMOUS_ALIGN_THRESHOLD_PX)
-        result = QRResult(data=data, offset_x=offset_x, offset_y=offset_y,
+
+        result = QRResult(data=qr_data, offset_x=offset_x, offset_y=offset_y,
                           aligned=aligned, timestamp=time.time())
         with self._lock:
             self._latest_result = result
         self._try_send_to_queue(result)
+
         color = (0, 255, 0) if aligned else (0, 200, 255)
-        pts = np.array([[rect.left, rect.top],
-                        [rect.left + rect.width, rect.top],
-                        [rect.left + rect.width, rect.top + rect.height],
-                        [rect.left, rect.top + rect.height]], dtype=np.int32)
         cv2.polylines(frame, [pts], isClosed=True, color=color, thickness=2)
         cv2.circle(frame, (qr_cx, qr_cy), 4, color, -1)
         cv2.line(frame, (cx, cy), (qr_cx, qr_cy), color, 1)
-        cv2.putText(frame, "QR: " + data[:14], (rect.left, max(rect.top - 8, 12)),
+
+        # Cari sudut kiri atas untuk label teks
+        left_x = int(np.min(pts[:, 0]))
+        top_y = int(np.min(pts[:, 1]))
+        cv2.putText(frame, "QR: " + qr_data[:14], (left_x, max(top_y - 8, 12)),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1)
+
         status_txt = "ALIGNED" if aligned else ("dX:" + str(int(offset_x)) + "px dY:" + str(int(offset_y)) + "px")
         cv2.putText(frame, status_txt, (8, h - 10),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.45, color, 1)
