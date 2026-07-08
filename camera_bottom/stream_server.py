@@ -186,7 +186,7 @@ def _capture_loop():
         raw = frame.copy()
 
         # Jalankan deteksi QR sebelum overlay
-        if _detector is not None and getattr(_detector, "active", True):
+        if _detector is not None and _processor is not None:
             qr_data, dock_aligned, bbox = _detector.scan(
                 raw,
                 _processor.preprocess_for_qr(raw)
@@ -232,16 +232,6 @@ def _zmq_command_loop():
             elif action == "record_stop":
                 filepath = _recorder.stop()
                 _send_result(action, filepath)
-
-            elif action == "qr_activate":
-                if _detector is not None:
-                    _detector.active = True
-                    logger.info("[BottomStream] QR detector diaktifkan")
-
-            elif action == "qr_deactivate":
-                if _detector is not None:
-                    _detector.active = False
-                    logger.info("[BottomStream] QR detector dinonaktifkan")
 
             else:
                 logger.warning(f"[BottomStream] Unknown command: {action}")

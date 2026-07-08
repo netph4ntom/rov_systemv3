@@ -185,12 +185,12 @@ def _capture_loop():
 
         raw = frame.copy()
 
-        # Jalankan deteksi QR sebelum overlay
-        if _qr_detector is not None and getattr(_qr_detector, "active", True):
-            _qr_detector.process_frame(raw, _processor)
-
         # Frame dengan HUD untuk stream
         display = _processor.process(frame.copy())
+
+        # QR overlay (hanya saat detektor aktif untuk autonomous alignment)
+        if _qr_detector is not None and _qr_detector.is_active:
+            display = _qr_detector.process_frame(display)
 
         with _frame_lock:
             _raw_frame = raw
@@ -229,13 +229,11 @@ def _zmq_command_loop():
 
             elif action == "qr_activate":
                 if _qr_detector is not None:
-                    _qr_detector.active = True
-                    logger.info("[FrontStream] QR detector diaktifkan")
+                    _qr_detector.activate()
 
             elif action == "qr_deactivate":
                 if _qr_detector is not None:
-                    _qr_detector.active = False
-                    logger.info("[FrontStream] QR detector dinonaktifkan")
+                    _qr_detector.deactivate()
 
             else:
                 logger.warning(f"[FrontStream] Unknown command: {action}")
