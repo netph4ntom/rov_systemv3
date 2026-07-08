@@ -55,7 +55,6 @@ class QRDetector:
         if not _PYZBAR_OK:
             logger.warning("[QRDetector-Front] pyzbar tidak dapat diimport.")
 
-        # Inisialisasi WeChat QR Code detector
         self.wechat_detector = None
         self._init_wechat_detector()
 
@@ -63,20 +62,31 @@ class QRDetector:
         try:
             if ensure_wechat_models():
                 if hasattr(cv2, "wechat_qrcode_WeChatQRCode"):
-                    self.wechat_detector = cv2.wechat_qrcode_WeChatQRCode(
-                        WECHAT_QR_DETECT_PROTOTXT,
-                        WECHAT_QR_DETECT_CAFFEMODEL,
-                        WECHAT_QR_SR_PROTOTXT,
-                        WECHAT_QR_SR_CAFFEMODEL
-                    )
-                    logger.info("[QRDetector-Front] WeChat QR Code Detector berhasil diinisialisasi.")
+                    try:
+                        # Coba dengan 4 argumen (dengan Super Resolution)
+                        self.wechat_detector = cv2.wechat_qrcode_WeChatQRCode(
+                            WECHAT_QR_DETECT_PROTOTXT,
+                            WECHAT_QR_DETECT_CAFFEMODEL,
+                            WECHAT_QR_SR_PROTOTXT,
+                            WECHAT_QR_SR_CAFFEMODEL
+                        )
+                        logger.info("[QRDetector-Front] WeChat QR Code Detector (dengan Super Resolution) berhasil diinisialisasi.")
+                    except TypeError as te:
+                        if "arguments" in str(te):
+                            logger.warning(f"[QRDetector-Front] Gagal dengan 4 argumen: {te}. Mencoba dengan 2 argumen (tanpa Super Resolution)...")
+                            self.wechat_detector = cv2.wechat_qrcode_WeChatQRCode(
+                                WECHAT_QR_DETECT_PROTOTXT,
+                                WECHAT_QR_DETECT_CAFFEMODEL
+                            )
+                            logger.info("[QRDetector-Front] WeChat QR Code Detector (tanpa Super Resolution) berhasil diinisialisasi.")
+                        else:
+                            raise te
                 else:
                     logger.warning("[QRDetector-Front] Modul WeChatQRCode tidak tersedia di OpenCV. Menggunakan pyzbar.")
             else:
                 logger.warning("[QRDetector-Front] Gagal mengunduh model WeChat QR. Menggunakan pyzbar.")
         except Exception as e:
             logger.error(f"[QRDetector-Front] Gagal inisialisasi WeChat QR: {e}. Menggunakan pyzbar.")
-
 
     def activate(self):
         with self._lock:
