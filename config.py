@@ -84,10 +84,11 @@ LOG_LEVEL = "DEBUG"               # DEBUG | INFO | WARNING | ERROR
 # ──────────────────────────────────────────────
 # MAVLINK
 # ──────────────────────────────────────────────
-MAVLINK_CONNECTION_STRING  = "udp:0.0.0.0:14550"
-MAVLINK_BAUD               = 115200
+MAVLINK_CONNECTION_STRING  = os.getenv("MAVLINK_CONNECTION_STRING", "udp:0.0.0.0:14550")
+MAVLINK_BAUD               = int(os.getenv("MAVLINK_BAUD", "115200"))
 MAVLINK_SOURCE_SYSTEM      = 255       # GCS system ID
 MAVLINK_HEARTBEAT_INTERVAL = 1.0      # detik antar heartbeat
+
 
 # ──────────────────────────────────────────────
 # SERVO
