@@ -79,7 +79,7 @@ WECHAT_QR_MODEL_URLS = {
 # ──────────────────────────────────────────────
 import os
 LOG_DIR   = os.path.join(os.path.dirname(__file__), "logs")
-LOG_LEVEL = "DEBUG"               # DEBUG | INFO | WARNING | ERROR
+LOG_LEVEL = "INFO"               # DEBUG | INFO | WARNING | ERROR
 
 # ──────────────────────────────────────────────
 # MAVLINK
