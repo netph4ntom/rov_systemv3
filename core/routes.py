@@ -61,6 +61,11 @@ _active_clients = 0
 _clients_lock = threading.Lock()
 _loop: Optional[asyncio.AbstractEventLoop] = None
 
+# Throttle untuk emisi telemetry ke WebSocket (10Hz)
+_last_telemetry_emit_time = 0.0
+_telemetry_emit_interval = 0.1  # detik
+_telemetry_lock = threading.Lock()
+
 # ZMQ socket references (Core binds PUSH sockets, cameras connect PULL sockets)
 _zmq_ctx: Optional[zmq.Context] = None
 _zmq_push_front: Optional[zmq.Socket] = None
@@ -149,8 +154,21 @@ def create_app(
 
     # Set callbacks
     def _on_telemetry(state: dict):
+        # Trajectory Estimator tetap menerima data di full frequency untuk akurasi dead-reckoning
         traj.update_from_telemetry(state)
-        _emit_proxy("telemetry_update", state)
+        
+        # Batasi pengiriman telemetry ke WebSocket maksimal 10Hz
+        global _last_telemetry_emit_time
+        import time
+        now = time.time()
+        should_emit = False
+        with _telemetry_lock:
+            if now - _last_telemetry_emit_time >= _telemetry_emit_interval:
+                _last_telemetry_emit_time = now
+                should_emit = True
+        
+        if should_emit:
+            _emit_proxy("telemetry_update", state)
 
     tele.on_telemetry_update = _on_telemetry
 

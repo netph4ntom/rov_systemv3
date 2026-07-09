@@ -75,30 +75,21 @@ class FrontImageProcessor:
     def _color_correction(self, frame: np.ndarray) -> np.ndarray:
         """
         Kompensasi white-balance ringan untuk kolam 1 meter.
-
-        Di kolam dangkal 1m, atenuasi warna jauh lebih sedikit dibanding
-        laut dalam — boost merah berlebihan malah membuat gambar kemerahan.
-        Nilai default (dari config):
-          RED_BOOST  = 10  (vs 30 yang terlalu agresif untuk kolam)
-          BLUE_REDUCE = 5  (vs 10)
-
-        cv2.add/subtract sudah saturate di 0–255, tidak perlu clipping manual.
+        Modifikasi channel merah dan biru secara langsung di memori gambar (in-place).
         """
-        b, g, r = cv2.split(frame)
-        r = cv2.add(r, COLOR_CORRECTION_RED_BOOST)
-        b = cv2.subtract(b, COLOR_CORRECTION_BLUE_REDUCE)
-        return cv2.merge([b, g, r])
+        frame[:, :, 2] = cv2.add(frame[:, :, 2], COLOR_CORRECTION_RED_BOOST)
+        frame[:, :, 0] = cv2.subtract(frame[:, :, 0], COLOR_CORRECTION_BLUE_REDUCE)
+        return frame
 
     def _enhance_contrast(self, frame: np.ndarray) -> np.ndarray:
         """
         CLAHE pada kanal L (LAB color space) untuk contrast lokal.
-        CLAHE di-init sekali di __init__ untuk menghindari object allocation tiap frame.
+        Dilakukan secara in-place tanpa memisahkan channel untuk menghindari alokasi redundan.
         """
         lab = cv2.cvtColor(frame, cv2.COLOR_BGR2LAB)
-        l, a, b = cv2.split(lab)
-        l = self._clahe.apply(l)
-        lab = cv2.merge([l, a, b])
-        return cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
+        lab[:, :, 0] = self._clahe.apply(lab[:, :, 0])
+        cv2.cvtColor(lab, cv2.COLOR_LAB2BGR, dst=frame)
+        return frame
 
     def _draw_hud(self, frame: np.ndarray) -> np.ndarray:
         """

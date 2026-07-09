@@ -23,6 +23,13 @@ class BottomImageProcessor:
         self._dock_aligned: bool = False         # injeksi dari docking logic
         self._last_bbox: np.ndarray | None = None  # injeksi dari qr_detector
 
+        # Buat CLAHE sekali untuk menghindari object allocation tiap call
+        from config import CLAHE_CLIP_LIMIT, CLAHE_TILE_SIZE
+        self._clahe = cv2.createCLAHE(
+            clipLimit=CLAHE_CLIP_LIMIT,
+            tileGridSize=CLAHE_TILE_SIZE,
+        )
+
     # ──────────────────────────────────────────
     # State injection (dipanggil dari qr_detector)
     # ──────────────────────────────────────────
@@ -67,19 +74,16 @@ class BottomImageProcessor:
         Kembalikan versi grayscale + CLAHE + Gaussian Blur untuk mempermudah deteksi QR code oleh pyzbar.
         Dipanggil oleh qr_detector.py, BUKAN dipakai untuk stream.
         """
-        from config import CLAHE_CLIP_LIMIT, CLAHE_TILE_SIZE
-        
         # 1. Grayscale
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         
-        # 2. CLAHE (Contrast Limited Adaptive Histogram Equalization) untuk mengatasi low-contrast/pencahayaan tidak rata
-        clahe = cv2.createCLAHE(clipLimit=CLAHE_CLIP_LIMIT, tileGridSize=CLAHE_TILE_SIZE)
-        enhanced = clahe.apply(gray)
+        # 2. CLAHE (Contrast Limited Adaptive Histogram Equalization)
+        enhanced = self._clahe.apply(gray)
         
-        # 3. Gaussian Blur tipis untuk mengurangi noise/turbulensi air (high frequency noise)
-        blurred = cv2.GaussianBlur(enhanced, (3, 3), 0)
+        # 3. Gaussian Blur secara in-place untuk mengurangi noise
+        cv2.GaussianBlur(enhanced, (3, 3), 0, dst=enhanced)
         
-        return blurred
+        return enhanced
 
     # ──────────────────────────────────────────
     # Drawing helpers
@@ -88,7 +92,8 @@ class BottomImageProcessor:
         kernel = np.array([[0, -1, 0],
                            [-1, 5,-1],
                            [0, -1, 0]])
-        return cv2.filter2D(frame, -1, kernel)
+        cv2.filter2D(frame, -1, kernel, dst=frame)
+        return frame
 
     def _draw_qr_bbox(self, frame: np.ndarray) -> np.ndarray:
         if self._last_bbox is not None and len(self._last_bbox) > 0:

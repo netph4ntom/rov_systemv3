@@ -167,11 +167,12 @@ _result_queue: Optional[ZmqQueueWrapper] = None
 
 _raw_frame = None
 _display_frame = None
+_frame_id = 0
 _frame_lock = threading.Lock()
 
 
 def _capture_loop():
-    global _raw_frame, _display_frame
+    global _raw_frame, _display_frame, _frame_id
 
     while True:
         if _camera is None or _processor is None:
@@ -189,18 +190,19 @@ def _capture_loop():
         if _detector is not None and _processor is not None:
             qr_data, dock_aligned, bbox = _detector.scan(
                 raw,
-                _processor.preprocess_for_qr(raw)
+                _processor
             )
             _processor.update_qr_data(qr_data)
             _processor.update_dock_status(dock_aligned)
             _processor.update_bbox(bbox)
 
         # Frame dengan HUD untuk stream
-        display = _processor.process(frame.copy())
+        display = _processor.process(frame)
 
         with _frame_lock:
             _raw_frame = raw
             _display_frame = display
+            _frame_id += 1
 
         # Tulis ke recorder jika sedang recording
         if _recorder is not None:
@@ -255,13 +257,21 @@ def _send_result(action: str, filepath: Optional[str]):
 
 
 def _generate_frames():
+    last_frame_id = -1
     while True:
         with _frame_lock:
             frame = _display_frame
+            current_frame_id = _frame_id
 
         if frame is None:
             time.sleep(0.03)
             continue
+
+        if current_frame_id == last_frame_id:
+            time.sleep(0.01)  # Tunggu 10ms jika belum ada frame baru
+            continue
+
+        last_frame_id = current_frame_id
 
         ret, buffer = cv2.imencode(
             ".jpg", frame,

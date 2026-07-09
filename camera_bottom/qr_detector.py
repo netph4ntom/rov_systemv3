@@ -93,7 +93,7 @@ class QRDetector:
     def scan(
         self,
         frame: np.ndarray,
-        preprocessed: np.ndarray,
+        processor: any,
     ) -> tuple[str | None, bool, np.ndarray | None]:
         """
         Scan QR code dari frame.
@@ -104,7 +104,7 @@ class QRDetector:
               qr_data        = string hasil decode, None jika tidak ada
               is_dock_aligned = True jika QR center dekat center frame
               bbox           = np.ndarray shape (1, 4, 2) untuk cv2.polylines,
-                               None jika tidak terdeteksi
+                                None jika tidak terdeteksi
         """
         now = time.monotonic()
         if (now - self._last_scan_time) < self._scan_interval:
@@ -112,12 +112,15 @@ class QRDetector:
 
         self._last_scan_time = now
 
+        # Prapemrosesan dijalankan di sini, HANYA ketika interval scan terpenuhi
+        preprocessed = processor.preprocess_for_qr(frame)
+
         qr_data = None
         bbox = None
 
-        # 1. Coba WeChat QR Detector jika tersedia
+        # 1. Coba WeChat QR Detector jika tersedia (gunakan grayscale preprocessed untuk kecepatan CNN)
         if self.wechat_detector is not None:
-            qr_data, bbox = self._decode_wechat(frame)
+            qr_data, bbox = self._decode_wechat(preprocessed)
 
         # 2. Fallback ke pyzbar jika WeChat gagal atau tidak tersedia
         if qr_data is None and _PYZBAR_OK:
