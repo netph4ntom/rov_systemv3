@@ -113,7 +113,10 @@ class QRDetector:
         self._last_scan_time = now
 
         # Prapemrosesan dijalankan di sini, HANYA ketika interval scan terpenuhi
-        preprocessed = processor.preprocess_for_qr(frame)
+        if hasattr(processor, "preprocess_for_qr"):
+            preprocessed = processor.preprocess_for_qr(frame)
+        else:
+            preprocessed = processor  # Fallback jika gambar preprocessed dilewatkan langsung (legacy/test)
 
         qr_data = None
         bbox = None

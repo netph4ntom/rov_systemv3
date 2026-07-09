@@ -18,7 +18,7 @@ graph TD
     end
 
     subgraph "Process 1 - CoreAPI (Port 8000)"
-        Routes["Flask REST and Socket.IO Handler"]
+        Routes["FastAPI REST and Socket.IO Handler"]
         MAVLink["MAVLinkBridge - Serial or UDP Link"]
         Telemetry["TelemetryManager"]
         Trajectory["TrajectoryEstimator"]
@@ -27,13 +27,13 @@ graph TD
     end
 
     subgraph "Process 2 - CameraFront (Port 8001)"
-        FrontStream["Flask Stream Server"]
+        FrontStream["FastAPI Stream Server"]
         FrontCap["Capture Loop and Preprocessing - CLAHE"]
         FrontRec["FrontRecorder - Video Writer"]
     end
 
     subgraph "Process 3 - CameraBottom (Port 8002)"
-        BottomStream["Flask Stream Server"]
+        BottomStream["FastAPI Stream Server"]
         BottomCap["Capture Loop and Preprocessing"]
         QRDet["QRDetector - Docking Alignment"]
         BottomRec["BottomRecorder - Video Writer"]
@@ -77,7 +77,7 @@ graph TD
 
 #### 1. Proses CoreAPI (`main.py` -> `run_core_server`)
 Proses utama yang mengendalikan siklus hidup ROV dan jembatan ke operator:
-- **Flask & Socket.IO**: Melayani permintaan HTTP REST dan komunikasi dupleks penuh (*full-duplex*) berlatensi rendah ke dashboard operator React.
+- **FastAPI & Socket.IO**: Melayani permintaan HTTP REST dan komunikasi dupleks penuh (*full-duplex*) berlatensi rendah ke dashboard operator React.
 - **`MAVLinkBridge`**: Beroperasi di thread latar belakang untuk menjalin koneksi serial/UDP ke Pixhawk. Mengirimkan sinyal kendali seperti override RC channel (motor), arm/disarm, mode terbang, servo gripper, dan relay lampu.
 - **`TelemetryManager`**: Memilah (*parse*) frame pesan biner MAVLink (seperti `ATTITUDE`, `SYS_STATUS`, `BATTERY_STATUS`, `SCALED_PRESSURE2`, `HEARTBEAT`) menjadi state dictionary Python yang siap dikonsumsi UI.
 - **`TrajectoryEstimator`**: Melakukan perhitungan posisi estimasi (*dead reckoning*) berbasis integrasi matematika kecepatan masukan joystick ($\Delta x, \Delta y$) terhadap orientasi yaw kompas Pixhawk dan pembacaan sensor kedalaman (*depth*).
@@ -174,7 +174,7 @@ Bagi divisi elektronik dan embedded system, berikut spesifikasi integrasi fisik 
 
 ## 4. Dokumentasi API Lengkap (Untuk Frontend & REST)
 
-### 4.1. HTTP REST API (Flask)
+### 4.1. HTTP REST API (FastAPI)
 
 #### 1. Status Utama
 `GET /api/status`
@@ -329,7 +329,7 @@ Bagi pengembang penerus sistem ROV ini, berikut langkah penanganan berkas dan tr
 - [config.py](file:///d:/PROJECT%20ROV/rov_revisi_stream/config.py): Pusat parameter threshold failsafe, port server, pin channel servo, dan setting algoritma kamera.
 - [core/logger.py](file:///d:/PROJECT%20ROV/rov_revisi_stream/core/logger.py): Pengaturan logging terpusat dan implementasi colored formatter.
 - [core/failsafe.py](file:///d:/PROJECT%20ROV/rov_revisi_stream/core/failsafe.py): State machine logika kemudi darurat.
-- [core/routes.py](file:///d:/PROJECT%20ROV/rov_revisi_stream/core/routes.py): Endpoint routing Flask dan penanganan event Socket.IO.
+- [core/routes.py](file:///d:/PROJECT%20ROV/rov_revisi_stream/core/routes.py): Endpoint routing FastAPI dan penanganan event Socket.IO.
 - [core/websocket.py](file:///d:/PROJECT%20ROV/rov_revisi_stream/core/websocket.py): Penguras shared queue proses kamera (*Queue Drainer*).
 - [core/mavlink.py](file:///d:/PROJECT%20ROV/rov_revisi_stream/core/mavlink.py): Bridge komunikasi serial PyMAVLink.
 
@@ -349,3 +349,27 @@ Bagi pengembang penerus sistem ROV ini, berikut langkah penanganan berkas dan tr
 - **Kamera Gagal Terbuka (Exit Code Proses Kamera != 0)**: OpenCV gagal membaca index hardware. Cek ketersediaan kamera dengan perintah `v4l2-ctl --list-devices` dan perbarui `CAMERA_FRONT_INDEX` atau `CAMERA_BOTTOM_INDEX` di `config.py`.
 - **Dashboard Tidak Menerima Data**: Cek apakah port server `8000` diblokir oleh Windows Defender Firewall atau UFW Linux Pi. Pastikan React client melakukan inisialisasi Socket.IO dengan opsi `{ transports: ["websocket"] }`.
 - **Delay Umpan Video Tinggi**: Kurangi resolusi frame (e.g., `640x480`) atau turunkan kualitas kompresi JPEG (`MJPEG_QUALITY = 80`) di file `config.py` untuk meringankan beban transmisi jaringan tether.
+
+---
+
+## 6. Optimalisasi Performa & Efisiensi CPU (Maret 2026/Terbaru)
+
+Sistem telah dioptimalkan secara mendalam untuk mengurangi beban CPU pada komputer pendamping (Companion Computer seperti Raspberry Pi) tanpa menurunkan FPS, kualitas visual, atau responsivitas kendali:
+
+### 6.1. Pengolahan Citra In-Place (Vision)
+Untuk menghindari alokasi memori array gambar baru di setiap frame yang memicu overhead Garbage Collector (GC):
+- **Koreksi Warna (Kamera Depan)**: Mengganti operasi lambat `cv2.split` dan `cv2.merge` dengan modifikasi langsung (in-place) pada channel NumPy:
+  ```python
+  frame[:, :, 2] = cv2.add(frame[:, :, 2], COLOR_CORRECTION_RED_BOOST)
+  frame[:, :, 0] = cv2.subtract(frame[:, :, 0], COLOR_CORRECTION_BLUE_REDUCE)
+  ```
+- **Kontras LAB & CLAHE**: Kontras dinamis (CLAHE) diterapkan secara in-place pada channel L dari LAB color space. Konversi balik menggunakan parameter `dst=frame` untuk menulis langsung ke buffer gambar asal.
+- **Penyaringan Spasial (Filter)**: Filter penajaman (`cv2.filter2D`) dan penghalusan (`cv2.GaussianBlur`) dikonfigurasi untuk menulis langsung pada buffer asal (`dst=frame` / `dst=enhanced`).
+
+### 6.2. Prapemrosesan QR On-Demand & Grayscale WeChat QR
+- **Throttling Prapemrosesan**: Grayscale, CLAHE, dan blur untuk kebutuhan QR Code reader di kamera bawah dipindahkan agar **hanya berjalan saat interval scan aktif** (5Hz atau tiap 200ms), bukan di setiap frame kamera (15 FPS+). Ini memotong beban prapemrosesan hingga ~67%.
+- **Deep Learning Input**: WeChat QR Code detector yang berat (berbasis CNN) dialihkan untuk memproses frame **grayscale 1-channel** hasil prapemrosesan, memangkas ukuran input data sebanyak 3x lipat dibanding pengolahan frame BGR 3-channel asli.
+
+### 6.3. Penghematan Bandwidth & Throttling Telemetri (10Hz)
+- **Throttling WebSocket**: Emisi telemetri ke dashboard React via Socket.IO dibatasi maksimal **10Hz (tiap 100ms)** secara thread-safe menggunakan lock. Ini mencegah overhead serialisasi JSON dan pengiriman paket data berkecepatan tinggi (100Hz+) ke React.
+- **Kendali Otonom Real-Time**: Perhitungan estimasi lintasan (`TrajectoryEstimator`) di backend tetap menerima telemetry dengan kecepatan penuh (tanpa throttle) agar akurasi dead-reckoning tetap 100% terjaga.

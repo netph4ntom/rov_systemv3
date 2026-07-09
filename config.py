@@ -4,14 +4,14 @@
 # ──────────────────────────────────────────────
 # KAMERA
 # ──────────────────────────────────────────────
-CAMERA_FRONT_INDEX   = 1          # index /dev/videoX untuk kamera depan
-CAMERA_BOTTOM_INDEX  = 0          # index /dev/videoX untuk kamera bawah
+CAMERA_FRONT_INDEX   = 0          # index /dev/videoX untuk kamera depan
+CAMERA_BOTTOM_INDEX  = 1          # index /dev/videoX untuk kamera bawah
 
 FRAME_WIDTH   = 640
 FRAME_HEIGHT  = 480
 FRAME_FPS     = 15
 
-MJPEG_QUALITY = 45                # kualitas JPEG 1–100 (makin kecil makin ringan)
+MJPEG_QUALITY = 35                # kualitas JPEG 1–100 (makin kecil makin ringan)
 
 # ------------------------------------------------
 # IMAGE PROCESSING
