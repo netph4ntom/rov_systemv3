@@ -369,7 +369,7 @@ Python Exec: {sys.executable}
             def on_pong(data):
                 nonlocal pong_received
                 pong_received = True
-                print(f" {SYM_PASS} Received 'pong_rov' from Core API: {data}")
+                print(f"  {SYM_PASS} Received 'pong_rov' from Core API: {data}")
 
             try:
                 # Try negotiating automatically
