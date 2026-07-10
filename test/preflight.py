@@ -355,6 +355,12 @@ Python Exec: {sys.executable}
         
         try:
             import socketio
+            import logging
+            # Suppress socketio and engineio internal logging warnings
+            logging.getLogger("socketio").setLevel(logging.CRITICAL)
+            logging.getLogger("engineio").setLevel(logging.CRITICAL)
+            logging.getLogger("urllib3").setLevel(logging.CRITICAL)
+            
             sio_client = socketio.Client(logger=False, engineio_logger=False)
             
             pong_received = False
