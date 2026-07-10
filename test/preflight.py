@@ -8,9 +8,10 @@
 #   2. Software Dependencies
 #   3. Vision & QR Model Readiness
 #   4. Camera Stream Services (Front & Bottom)
-#   5. MAVLink Communications Link
-#   6. Live Telemetry Streams (Battery, Orientation, Depth)
-#   7. Interactive Hardware Controls (LED, Gripper, Motors)
+#   5. Core API & WebSocket Server Connection
+#   6. MAVLink Communications Link
+#   7. Live Telemetry Streams (Battery, Orientation, Depth)
+#   8. Interactive Hardware Controls (LED, Gripper, Motors)
 #
 # Usage:
 #   python test/preflight.py
@@ -81,7 +82,7 @@ Python Exec: {sys.executable}
     # Check 1: Software Environment & Dependencies
     # ──────────────────────────────────────────────────────────────────────────
     def run_check_dependencies(self):
-        print(f"\n{COLOR_BOLD}[1/7] Checking Software Environment & Libraries...{COLOR_RESET}")
+        print(f"\n{COLOR_BOLD}[1/8] Checking Software Environment & Libraries...{COLOR_RESET}")
         
         # Verify Python version
         py_ver = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
@@ -118,7 +119,7 @@ Python Exec: {sys.executable}
     # Check 2: Vision & QR Subsystem Readiness
     # ──────────────────────────────────────────────────────────────────────────
     def run_check_vision_engines(self):
-        print(f"\n{COLOR_BOLD}[2/7] Checking Vision Modules & QR Detection Engines...{COLOR_RESET}")
+        print(f"\n{COLOR_BOLD}[2/8] Checking Vision Modules & QR Detection Engines...{COLOR_RESET}")
 
         if "cv2" in self.import_errors:
             print(f"  {SYM_FAIL} OpenCV not available. Skipping vision engine tests.")
@@ -214,7 +215,7 @@ Python Exec: {sys.executable}
     # Check 3: Companion Computer Health & Resources
     # ──────────────────────────────────────────────────────────────────────────
     def run_check_system_resources(self):
-        print(f"\n{COLOR_BOLD}[3/7] Checking System Resources & Temperature...{COLOR_RESET}")
+        print(f"\n{COLOR_BOLD}[3/8] Checking System Resources & Temperature...{COLOR_RESET}")
 
         if "psutil" in self.import_errors:
             print(f"  {SYM_FAIL} psutil library not available. Skipping resource diagnostics.")
@@ -288,7 +289,7 @@ Python Exec: {sys.executable}
     # Check 4: Camera Service Connections
     # ──────────────────────────────────────────────────────────────────────────
     def run_check_camera_services(self):
-        print(f"\n{COLOR_BOLD}[4/7] Checking Camera Stream Services...{COLOR_RESET}")
+        print(f"\n{COLOR_BOLD}[4/8] Checking Camera Stream Services...{COLOR_RESET}")
         
         from config import (
             FS_CAMERA_HEALTH_URL_FRONT,
@@ -324,10 +325,90 @@ Python Exec: {sys.executable}
             self.results["camera_services"] = ("FAIL", "Both camera stream services are offline. Verify camera streaming processes.")
 
     # ──────────────────────────────────────────────────────────────────────────
+    # Check 5: Core API & WebSocket Server Connection Check
+    # ──────────────────────────────────────────────────────────────────────────
+    def run_check_core_api_websocket(self):
+        print(f"\n{COLOR_BOLD}[5/8] Checking Core API and WebSocket (Socket.IO) Status...{COLOR_RESET}")
+        
+        from config import PORT_CORE_API
+        
+        core_url = f"http://localhost:{PORT_CORE_API}/api/health"
+        sio_url = f"http://localhost:{PORT_CORE_API}"
+
+        # 1. Check REST API Health
+        print(f"  Connecting to REST API: {core_url}...")
+        api_ok = False
+        try:
+            with urllib.request.urlopen(core_url, timeout=2.0) as resp:
+                data = json.loads(resp.read().decode())
+                if data.get("status") == "ok":
+                    print(f"  {SYM_PASS} Core API REST Service: Online & healthy.")
+                    api_ok = True
+                else:
+                    print(f"  {SYM_WARN} Core API REST Service: Responded with '{data}'")
+        except Exception as e:
+            print(f"  {SYM_FAIL} Core API REST Service: Offline or unreachable (Error: {e})")
+
+        # 2. Check WebSocket (Socket.IO) Connection
+        print(f"  Connecting to WebSocket (Socket.IO) at {sio_url}...")
+        ws_ok = False
+        
+        try:
+            import socketio
+            sio_client = socketio.Client(logger=False, engineio_logger=False)
+            
+            pong_received = False
+            
+            @sio_client.on("pong_rov")
+            def on_pong(data):
+                nonlocal pong_received
+                pong_received = True
+                print(f"    {SYM_PASS} Received 'pong_rov' from Core API: {data}")
+
+            try:
+                # Try negotiating automatically
+                sio_client.connect(sio_url, wait_timeout=2)
+            except Exception:
+                try:
+                    # Fallback to explicit polling transport
+                    sio_client.connect(sio_url, transports=["polling"], wait_timeout=2)
+                except Exception as conn_err:
+                    raise conn_err
+            
+            # Emit ping event
+            sio_client.emit("ping_rov", {"test": "preflight"})
+            
+            # Wait up to 2.0s for pong response
+            wait_start = time.time()
+            while time.time() - wait_start < 2.0 and not pong_received:
+                time.sleep(0.1)
+                
+            sio_client.disconnect()
+            
+            if pong_received:
+                print(f"  {SYM_PASS} WebSocket (Socket.IO) Communication: Connected and verified.")
+                ws_ok = True
+            else:
+                print(f"  {SYM_WARN} WebSocket (Socket.IO): Connected, but 'pong_rov' response timed out.")
+                ws_ok = True # Connected but pong failed
+        except ImportError:
+            print(f"  {SYM_FAIL} WebSocket test: 'python-socketio' library not available for import.")
+        except Exception as e:
+            print(f"  {SYM_FAIL} WebSocket (Socket.IO) Connection: Failed (Error: {e})")
+
+        # Record results
+        if api_ok and ws_ok:
+            self.results["core_api_and_websocket"] = ("PASS", f"Core API REST and Socket.IO online on Port {PORT_CORE_API}")
+        elif api_ok or ws_ok:
+            self.results["core_api_and_websocket"] = ("WARN", f"Core API REST/Socket.IO partially available on Port {PORT_CORE_API}")
+        else:
+            self.results["core_api_and_websocket"] = ("FAIL", f"Core API and WebSocket server are offline on Port {PORT_CORE_API}. Run main.py first.")
+
+    # ──────────────────────────────────────────────────────────────────────────
     # Check 5: MAVLink Communication Bridge
     # ──────────────────────────────────────────────────────────────────────────
     def run_check_mavlink_link(self):
-        print(f"\n{COLOR_BOLD}[5/7] Checking MAVLink Communication Link to Flight Controller...{COLOR_RESET}")
+        print(f"\n{COLOR_BOLD}[6/8] Checking MAVLink Communication Link to Flight Controller...{COLOR_RESET}")
 
         if "pymavlink" in self.import_errors:
             print(f"  {SYM_FAIL} pymavlink library missing. Skipping MAVLink checks.")
@@ -368,7 +449,7 @@ Python Exec: {sys.executable}
     # Check 6: Live Telemetry Stream Validation
     # ──────────────────────────────────────────────────────────────────────────
     def run_check_telemetry(self):
-        print(f"\n{COLOR_BOLD}[6/7] Validating Telemetry Messages Stream...{COLOR_RESET}")
+        print(f"\n{COLOR_BOLD}[7/8] Validating Telemetry Messages Stream...{COLOR_RESET}")
 
         if not self.mav or not self.mav.is_connected:
             print(f"  {SYM_FAIL} MAVLink link not connected. Skipping telemetry stream validation.")
@@ -434,7 +515,7 @@ Python Exec: {sys.executable}
     # Check 7: Interactive Control & Actuators Check
     # ──────────────────────────────────────────────────────────────────────────
     def run_interactive_actuator_tests(self):
-        print(f"\n{COLOR_BOLD}[7/7] Interactive Hardware Actuator Controls...{COLOR_RESET}")
+        print(f"\n{COLOR_BOLD}[8/8] Interactive Hardware Actuator Controls...{COLOR_RESET}")
 
         if not self.mav or not self.mav.is_connected:
             print(f"  {SYM_FAIL} MAVLink link not connected. Actuator control tests will be skipped.")
@@ -652,6 +733,7 @@ def main():
         tester.run_check_vision_engines()
         tester.run_check_system_resources()
         tester.run_check_camera_services()
+        tester.run_check_core_api_websocket()
         tester.run_check_mavlink_link()
         tester.run_check_telemetry()
         tester.run_interactive_actuator_tests()
