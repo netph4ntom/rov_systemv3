@@ -41,24 +41,17 @@ class FrontCamera:
     # Internal
     # ──────────────────────────────────────────
     def _open(self):
-        """Buka kamera dan set properti resolusi / FPS."""
-        logger.info(f"[FrontCamera] Membuka kamera index={self.index}")
-        self.cap = cv2.VideoCapture(self.index)
-
-        props = {
-            cv2.CAP_PROP_FRAME_WIDTH:  FRAME_WIDTH,
-            cv2.CAP_PROP_FRAME_HEIGHT: FRAME_HEIGHT,
-            cv2.CAP_PROP_FPS:          FRAME_FPS,
-        }
-        for prop, value in props.items():
-            if not self.cap.set(prop, value):
-                logger.warning(
-                    f"[FrontCamera] Gagal set property {prop}={value} "
-                    f"(mungkin tidak didukung hardware)"
-                )
+        """Buka kamera menggunakan GStreamer."""
+        logger.info(f"[FrontCamera] Membuka kamera index={self.index} via GStreamer")
+        gst_pipeline = (
+            f"v4l2src device=/dev/video{self.index} ! "
+            f"video/x-raw, width={FRAME_WIDTH}, height={FRAME_HEIGHT}, framerate={FRAME_FPS}/1 ! "
+            f"videoconvert ! appsink"
+        )
+        self.cap = cv2.VideoCapture(gst_pipeline, cv2.CAP_GSTREAMER)
 
         if not self.cap.isOpened():
-            logger.error("[FrontCamera] Gagal membuka kamera!")
+            logger.error("[FrontCamera] Gagal membuka kamera via GStreamer!")
 
     # ──────────────────────────────────────────
     # Public API

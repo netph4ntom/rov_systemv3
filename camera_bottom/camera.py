@@ -17,17 +17,19 @@ class BottomCamera:
         self._open()
 
     def _open(self):
-        logger.info(f"[BottomCamera] Membuka kamera index={self.index}")
-        self.cap = cv2.VideoCapture(self.index)
-        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH,  FRAME_WIDTH)
-        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, FRAME_HEIGHT)
-        self.cap.set(cv2.CAP_PROP_FPS,          FRAME_FPS)
+        logger.info(f"[BottomCamera] Membuka kamera index={self.index} via GStreamer")
+        gst_pipeline = (
+            f"v4l2src device=/dev/video{self.index} ! "
+            f"video/x-raw, width={FRAME_WIDTH}, height={FRAME_HEIGHT}, framerate={FRAME_FPS}/1 ! "
+            f"videoconvert ! appsink"
+        )
+        self.cap = cv2.VideoCapture(gst_pipeline, cv2.CAP_GSTREAMER)
 
         # Auto-exposure ON supaya adaptif saat ROV mendekati dock
         self.cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 3)  # 3 = auto, 1 = manual
 
         if not self.cap.isOpened():
-            logger.error("[BottomCamera] Gagal membuka kamera!")
+            logger.error("[BottomCamera] Gagal membuka kamera via GStreamer!")
 
     def read_frame(self) -> tuple[bool, any]:
         """Baca frame dengan auto-reconnect jika kamera terputus."""
