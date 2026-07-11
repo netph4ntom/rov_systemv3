@@ -9,6 +9,16 @@ from config import CAMERA_BOTTOM_INDEX, FRAME_WIDTH, FRAME_HEIGHT, FRAME_FPS
 
 logger = logging.getLogger(__name__)
 
+# Inisialisasi GStreamer runtime via PyGObject
+try:
+    import gi
+    gi.require_version("Gst", "1.0")
+    from gi.repository import Gst
+    Gst.init(None)
+    logger.info(f"[GStreamer] Runtime inisialisasi sukses. Versi: {Gst.version()}")
+except (ImportError, ValueError) as e:
+    logger.warning(f"[GStreamer] Gagal inisialisasi PyGObject/GStreamer runtime: {e}")
+
 
 class BottomCamera:
     def __init__(self):

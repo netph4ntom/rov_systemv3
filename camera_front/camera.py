@@ -18,6 +18,16 @@ from config import CAMERA_FRONT_INDEX, FRAME_WIDTH, FRAME_HEIGHT, FRAME_FPS
 
 logger = logging.getLogger(__name__)
 
+# Inisialisasi GStreamer runtime via PyGObject
+try:
+    import gi
+    gi.require_version("Gst", "1.0")
+    from gi.repository import Gst
+    Gst.init(None)
+    logger.info(f"[GStreamer] Runtime inisialisasi sukses. Versi: {Gst.version()}")
+except (ImportError, ValueError) as e:
+    logger.warning(f"[GStreamer] Gagal inisialisasi PyGObject/GStreamer runtime: {e}")
+
 _RECONNECT_COOLDOWN_S = 2.0
 
 
