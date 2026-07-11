@@ -30,7 +30,9 @@ class BottomCamera:
         logger.info(f"[BottomCamera] Membuka kamera index={self.index} via GStreamer")
         gst_pipeline = (
             f"v4l2src device=/dev/video{self.index} ! "
-            f"video/x-raw, width={FRAME_WIDTH}, height={FRAME_HEIGHT}, framerate={FRAME_FPS}/1 ! "
+            f"videoconvert ! "
+            f"videoscale ! video/x-raw, width={FRAME_WIDTH}, height={FRAME_HEIGHT} ! "
+            f"videorate ! video/x-raw, framerate={FRAME_FPS}/1 ! "
             f"videoconvert ! appsink"
         )
         self.cap = cv2.VideoCapture(gst_pipeline, cv2.CAP_GSTREAMER)
