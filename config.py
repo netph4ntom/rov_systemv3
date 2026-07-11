@@ -4,8 +4,8 @@
 # ──────────────────────────────────────────────
 # KAMERA
 # ──────────────────────────────────────────────
-CAMERA_FRONT_INDEX   = 0          # index /dev/videoX untuk kamera depan
-CAMERA_BOTTOM_INDEX  = 1          # index /dev/videoX untuk kamera bawah
+CAMERA_FRONT_INDEX   = 0          # index /dev/videoX untuk kamera depan (biasanya 0)
+CAMERA_BOTTOM_INDEX  = 2          # index /dev/videoX untuk kamera bawah (di Linux biasanya 2, karena 1 adalah metadata)
 
 FRAME_WIDTH   = 640
 FRAME_HEIGHT  = 480
