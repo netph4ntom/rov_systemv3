@@ -37,8 +37,8 @@ class BottomCamera:
         )
         self.cap = cv2.VideoCapture(gst_pipeline, cv2.CAP_GSTREAMER)
 
-        # Auto-exposure ON supaya adaptif saat ROV mendekati dock
-        self.cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 3)  # 3 = auto, 1 = manual
+        # Auto-exposure ON secara default di GStreamer. Panggilan cap.set() ditiadakan untuk menghindari warning.
+        # self.cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 3)
 
         if not self.cap.isOpened():
             logger.error("[BottomCamera] Gagal membuka kamera via GStreamer!")
