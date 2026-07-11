@@ -33,7 +33,7 @@ class BottomCamera:
             f"videoconvert ! "
             f"videoscale ! video/x-raw, width={FRAME_WIDTH}, height={FRAME_HEIGHT} ! "
             f"videorate ! video/x-raw, framerate={FRAME_FPS}/1 ! "
-            f"videoconvert ! appsink"
+            f"videoconvert ! appsink drop=true max-buffers=1 sync=false"
         )
         self.cap = cv2.VideoCapture(gst_pipeline, cv2.CAP_GSTREAMER)
 

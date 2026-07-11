@@ -98,9 +98,6 @@ class CameraVideoTrack(MediaStreamTrack):
         video_frame.pts = pts
         video_frame.time_base = time_base
 
-        # Regulate speed to match expected FPS
-        await asyncio.sleep(1 / FRAME_FPS)
-
         return video_frame
 
 
