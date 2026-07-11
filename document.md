@@ -1,5 +1,5 @@
 # Dokumentasi Sistem ROV Vision & Control
-## Versi 1.1.0 — Pembaruan Sistem Autostart & Shutdown Cepat (Juli 2026)
+## Versi 1.2.0 — Perbaikan Latensi Streaming Video & GStreamer (Juli 2026)
 
 Dokumen ini ditujukan sebagai panduan teknis komprehensif bagi **Dosen Pembimbing**, **Divisi Elektronik**, **Embedded System Engineer**, **Frontend Engineer**, serta **Pengembang Penerus** sistem ROV. Dokumen ini menyajikan analisis mendalam tentang arsitektur perangkat lunak, spesifikasi hardware & protokol komunikasi, alur kerja sistem (*data flow*), detail antarmuka REST API & Socket.IO, sistem keamanan (*failsafe*), serta layanan logging terpusat.
 
@@ -88,14 +88,14 @@ Proses utama yang mengendalikan siklus hidup ROV dan jembatan ke operator:
 #### 2. Proses CameraFront (`main.py` -> `run_front_stream_server`)
 - Mengambil bingkai gambar (*frame*) dari sensor kamera depan.
 - Menerapkan manipulasi gambar real-time: CLAHE (*Contrast Limited Adaptive Histogram Equalization*) dan koreksi warna (*boosting* warna merah, reduksi warna biru) untuk menembus keterbatasan jarak pandang kolam.
-- Menyajikan aliran video (*video stream*) berbasis protokol MJPEG.
+- Menyajikan aliran video (*video stream*) berbasis protokol WebRTC untuk latensi rendah (port `8001/offer`) dengan fallback ke MJPEG (port `8001/stream`).
 - Memproses antrean perintah screenshot dan perekaman video (`cmd_front`).
 
 #### 3. Proses CameraBottom (`main.py` -> `run_bottom_stream_server`)
 - Mengambil frame dari sensor kamera bawah.
 - Menerapkan auto-exposure dinamik agar marker target tidak mengalami *over-exposure* akibat paparan lampu.
 - Menjalankan **`QRDetector`** (`pyzbar`/`wechat_qrcode`) secara berkala untuk mendeteksi QR code dan menghitung deviasi jarak titik pusat QR terhadap pusat frame kamera guna menentukan tingkat kelurusan (*docking alignment*).
-- Menyediakan MJPEG stream lengkap dengan HUD overlay status alignment dan bounding box QR code.
+- Menyediakan WebRTC stream (port `8002/offer`) dan MJPEG stream (port `8002/stream`) lengkap dengan HUD overlay status alignment dan bounding box QR code.
 
 ### 1.4. Komunikasi Antar-Proses (ZeroMQ IPC)
 Untuk meminimalkan interferensi antar-proses, sistem tidak menggunakan Shared Memory bawaan Python yang lambat, melainkan menggunakan **ZeroMQ (ZMQ)**:
@@ -418,6 +418,11 @@ Untuk mencegah tersumbatnya bandwidth transmisi tethering kabel LAN akibat pengi
 * PyMAVLink dan estimator lintasan (`TrajectoryEstimator`) tetap membaca data telemetry pada frekuensi tinggi (**50Hz**) di dalam loop internal agar perhitungan integrasi posisi tetap presisi.
 * Namun, emisi data ke UI React via Socket.IO dibatasi maksimal hanya **10Hz** menggunakan pencatatar timestamp dan thread-lock di `core/routes.py`.
 
+### 5.4. Pengurangan Latensi Video (Optimasi GStreamer & WebRTC)
+Untuk memotong delay konstan (~1 detik) pada feed video, diimplementasikan optimasi berikut:
+* **Antrian Non-blocking GStreamer (`appsink`)**: Pipeline GStreamer pada camera wrapper ditambahkan properti `appsink drop=true max-buffers=1 sync=false`. Hal ini memaksa driver kamera untuk mendrop frame lama di buffer memori jika terjadi perlambatan pemrosesan gambar, menjamin OpenCV selalu membaca frame paling aktual (real-time).
+* **Pacing Asinkron WebRTC**: Menghapus delay manual `asyncio.sleep` pada loop `MediaStreamTrack` WebRTC. Penjadwalan frame diserahkan sepenuhnya ke fungsi `next_timestamp()` bawaan `aiortc` untuk menghindari penundaan ganda (double pacing/latency) yang menyebabkan penumpukan frame di sisi frontend browser.
+
 ---
 
 ## 6. Panduan Pemeliharaan & Troubleshooting (Dev Guide)
@@ -456,7 +461,7 @@ Gunakan perintah berikut di terminal Raspberry Pi 5:
 2. **Kamera Tidak Terdeteksi**:
    * *Solusi*: Jalankan `v4l2-ctl --list-devices` untuk melihat nomor index hardware kamera. Sesuaikan nilai `CAMERA_FRONT_INDEX` dan `CAMERA_BOTTOM_INDEX` di `config.py` jika terbalik.
 3. **Umpan Video Delay Tinggi**:
-   * *Solusi*: Kurangi nilai `MJPEG_QUALITY` di `config.py` dari 35 menjadi 25 untuk mengurangi beban bandwidth jaringan kabel tether.
+   * *Solusi*: Pastikan properti `appsink drop=true max-buffers=1 sync=false` aktif di pipeline kamera untuk mendrop frame lama. Anda juga dapat menurunkan `MJPEG_QUALITY` di `config.py` menjadi 25 untuk mengurangi beban bandwidth kabel tether jika jaringan lambat.
 4. **Log Error "Address already in use"**:
    * *Solusi*: Terjadi bentrokan port karena service lama masih menggantung. Hentikan paksa seluruh proses python tersisa dengan perintah:
      ```bash
