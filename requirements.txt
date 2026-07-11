@@ -3,7 +3,7 @@
 
 # ── Computer Vision ────────────────────────────
 opencv-contrib-python>=4.8.0,<5.0.0        # kamera, image processing, MJPEG encode
-numpy>=1.24.0               # array operasi
+numpy>=1.24.0,<2.0.0        # array operasi
 pyzbar                      # QR code / barcode scanner
 
 # ── Web Server / API ───────────────────────────
