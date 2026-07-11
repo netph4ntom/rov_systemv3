@@ -185,6 +185,23 @@ Python Exec: {sys.executable}
                 print(f"  {SYM_WARN} cv2.wechat_qrcode module is not compiled in this OpenCV installation.")
                 self.results["vision_wechat"] = ("WARN", "OpenCV build has no WeChat QR module.")
 
+            # Check OpenCV GStreamer Support
+            build_info = cv2.getBuildInformation()
+            has_gstreamer = False
+            gstreamer_detail = ""
+            for line in build_info.split('\n'):
+                if "gstreamer" in line.lower() and "yes" in line.lower():
+                    has_gstreamer = True
+                    gstreamer_detail = line.strip()
+                    break
+            
+            if has_gstreamer:
+                print(f"  {SYM_PASS} OpenCV GStreamer support: Enabled ({gstreamer_detail})")
+                self.results["vision_gstreamer"] = ("PASS", "OpenCV compiled with GStreamer support.")
+            else:
+                print(f"  {SYM_WARN} OpenCV GStreamer support: NOT ENABLED! Video streaming may fail on Raspberry Pi.")
+                self.results["vision_gstreamer"] = ("WARN", "OpenCV not compiled with GStreamer support.")
+
             # Check pyzbar classic QR
             if "pyzbar" not in self.import_errors:
                 from pyzbar import pyzbar
@@ -294,6 +311,8 @@ Python Exec: {sys.executable}
         from config import (
             FS_CAMERA_HEALTH_URL_FRONT,
             FS_CAMERA_HEALTH_URL_BOTTOM,
+            PORT_STREAM_FRONT,
+            PORT_STREAM_BOTTOM,
         )
 
         checks = [
@@ -317,12 +336,43 @@ Python Exec: {sys.executable}
                 print(f"  {SYM_FAIL} {name}: Stream Server is OFFLINE or unreachable (Error: {e})")
                 failed_cams += 1
 
+        # Check WebRTC /offer signaling endpoint availability
+        webrtc_checks = [
+            ("Front Camera WebRTC Offer Endpoint", f"http://localhost:{PORT_STREAM_FRONT}/offer"),
+            ("Bottom Camera WebRTC Offer Endpoint", f"http://localhost:{PORT_STREAM_BOTTOM}/offer"),
+        ]
+
+        print(f"  Checking WebRTC Signaling Endpoints...")
+        for name, url in webrtc_checks:
+            print(f"  Connecting to WebRTC signaling endpoint: {url}...")
+            try:
+                # Send a POST request with an empty body to trigger the route validation
+                req = urllib.request.Request(
+                    url,
+                    data=b"{}",
+                    headers={"Content-Type": "application/json"},
+                    method="POST"
+                )
+                try:
+                    with urllib.request.urlopen(req, timeout=2.0) as resp:
+                        print(f"  {SYM_PASS} {name}: Active & responding.")
+                except urllib.error.HTTPError as he:
+                    if he.code in (400, 422):
+                        # 400 Bad Request is expected because the request body `{}` is missing "sdp"/"type" fields
+                        print(f"  {SYM_PASS} {name}: Active & responding (Expected HTTP {he.code}).")
+                    else:
+                        print(f"  {SYM_WARN} {name}: Endpoint active, but returned unexpected code {he.code}")
+                        failed_cams += 1
+            except Exception as e:
+                print(f"  {SYM_FAIL} {name}: Endpoint is OFFLINE or unreachable (Error: {e})")
+                failed_cams += 1
+
         if failed_cams == 0:
-            self.results["camera_services"] = ("PASS", "Both camera stream processes are online & healthy.")
-        elif failed_cams == 1:
-            self.results["camera_services"] = ("WARN", "One camera service is offline or degraded.")
+            self.results["camera_services"] = ("PASS", "Both camera stream processes & WebRTC endpoints are online.")
+        elif failed_cams < 4:
+            self.results["camera_services"] = ("WARN", "Camera services are partially offline or degraded.")
         else:
-            self.results["camera_services"] = ("FAIL", "Both camera stream services are offline. Verify camera streaming processes.")
+            self.results["camera_services"] = ("FAIL", "Both camera services are offline. Verify camera streaming processes.")
 
     # ──────────────────────────────────────────────────────────────────────────
     # Check 5: Core API & WebSocket Server Connection Check
@@ -411,7 +461,7 @@ Python Exec: {sys.executable}
             self.results["core_api_and_websocket"] = ("FAIL", f"Core API and WebSocket server are offline on Port {PORT_CORE_API}. Run main.py first.")
 
     # ──────────────────────────────────────────────────────────────────────────
-    # Check 5: MAVLink Communication Bridge
+    # Check 6: MAVLink Communication Bridge
     # ──────────────────────────────────────────────────────────────────────────
     def run_check_mavlink_link(self):
         print(f"\n{COLOR_BOLD}[6/8] Checking MAVLink Communication Link to Flight Controller...{COLOR_RESET}")
@@ -452,7 +502,7 @@ Python Exec: {sys.executable}
             self.mav = None
 
     # ──────────────────────────────────────────────────────────────────────────
-    # Check 6: Live Telemetry Stream Validation
+    # Check 7: Live Telemetry Stream Validation
     # ──────────────────────────────────────────────────────────────────────────
     def run_check_telemetry(self):
         print(f"\n{COLOR_BOLD}[7/8] Validating Telemetry Messages Stream...{COLOR_RESET}")
@@ -518,7 +568,7 @@ Python Exec: {sys.executable}
             self.results["telemetry"] = ("WARN", f"Active connection, but missing telemetry frames: {', '.join(missing_msgs)}")
 
     # ──────────────────────────────────────────────────────────────────────────
-    # Check 7: Interactive Control & Actuators Check
+    # Check 8: Interactive Control & Actuators Check
     # ──────────────────────────────────────────────────────────────────────────
     def run_interactive_actuator_tests(self):
         print(f"\n{COLOR_BOLD}[8/8] Interactive Hardware Actuator Controls...{COLOR_RESET}")
