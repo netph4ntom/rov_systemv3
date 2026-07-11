@@ -412,7 +412,6 @@ Untuk memotong beban pembersihan alokasi memori (*Garbage Collector*), proses ma
 Mendeteksi QR Code menggunakan WeChat CNN model sangat membebani CPU. Untuk mengatasinya, diterapkan teknik optimasi berikut:
 * **Throttling Frekuensi Scan**: QR Detector tidak dijalankan pada setiap frame video (15 FPS), melainkan dibatasi hanya berjalan setiap `QR_SCAN_INTERVAL_MS = 200` ms (5Hz).
 * **Grayscale Input**: WeChat QR model dikonfigurasi untuk memproses frame **grayscale 1-channel** hasil konversi, memotong beban komputasi Convolutional Neural Network hingga 3x lipat dibanding memproses frame warna BGR 3-channel asli.
-* **Filter Penajaman (Sharpening)**: Mengganti Gaussian Blur dengan filter *sharpening* 2D ringan pada tahap prapemrosesan QR. Hal ini mempertajam batas antar-modul biner QR sehingga detektor WeChat QR dan PyZbar dapat mengurai data dari jarak yang lebih jauh tanpa mengurangi kecepatan deteksi.
 
 ### 5.3. Throttling Emisi Telemetri WebSocket
 Untuk mencegah tersumbatnya bandwidth transmisi tethering kabel LAN akibat pengiriman ratusan paket JSON per detik dari PyMAVLink ke dashboard operator:

@@ -71,7 +71,7 @@ class BottomImageProcessor:
     # ──────────────────────────────────────────
     def preprocess_for_qr(self, frame: np.ndarray) -> np.ndarray:
         """
-        Kembalikan versi grayscale + CLAHE + Sharpening Ringan untuk mempermudah deteksi QR code.
+        Kembalikan versi grayscale + CLAHE + Gaussian Blur untuk mempermudah deteksi QR code oleh pyzbar.
         Dipanggil oleh qr_detector.py, BUKAN dipakai untuk stream.
         """
         # 1. Grayscale
@@ -80,13 +80,10 @@ class BottomImageProcessor:
         # 2. CLAHE (Contrast Limited Adaptive Histogram Equalization)
         enhanced = self._clahe.apply(gray)
         
-        # 3. Sharpening Ringan (meningkatkan ketajaman tepi modul QR agar terbaca lebih jauh)
-        kernel = np.array([[0, -1, 0],
-                           [-1, 5,-1],
-                           [0, -1, 0]], dtype=np.float32)
-        sharpened = cv2.filter2D(enhanced, -1, kernel)
+        # 3. Gaussian Blur secara in-place untuk mengurangi noise
+        cv2.GaussianBlur(enhanced, (3, 3), 0, dst=enhanced)
         
-        return sharpened
+        return enhanced
 
     # ──────────────────────────────────────────
     # Drawing helpers

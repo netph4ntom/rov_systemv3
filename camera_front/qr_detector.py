@@ -121,17 +121,10 @@ class QRDetector:
         qr_data = None
         pts = None
 
-        # Konversi ke grayscale dan terapkan sharpening ringan untuk deteksi lebih andal & hemat CPU
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        kernel = np.array([[0, -1, 0],
-                           [-1, 5,-1],
-                           [0, -1, 0]], dtype=np.float32)
-        sharpened = cv2.filter2D(gray, -1, kernel)
-
         # 1. Coba WeChat QR Detector jika tersedia
         if self.wechat_detector is not None:
             try:
-                res, points = self.wechat_detector.detectAndDecode(sharpened)
+                res, points = self.wechat_detector.detectAndDecode(frame)
                 if res and len(res) > 0 and len(points) > 0:
                     qr_data = res[0]
                     pts = np.array(points[0], dtype=np.int32)  # shape (4, 2)
@@ -141,7 +134,7 @@ class QRDetector:
         # 2. Fallback ke pyzbar jika WeChat gagal atau tidak tersedia
         if qr_data is None and _PYZBAR_OK:
             try:
-                decoded = pyzbar.decode(sharpened)
+                decoded = pyzbar.decode(frame)
                 if decoded:
                     qr = max(decoded, key=lambda q: q.rect.width * q.rect.height)
                     qr_data = qr.data.decode("utf-8", errors="replace")
