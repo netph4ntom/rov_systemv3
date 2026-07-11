@@ -62,8 +62,16 @@ def _shutdown(signum, frame):
     for p in _processes:
         if p.is_alive():
             p.terminate()
+    
+    # Tunggu maksimal 1 detik agar proses anak shutdown secara graceful
     for p in _processes:
-        p.join(timeout=3)
+        if p.is_alive():
+            p.join(timeout=1.0)
+            if p.is_alive():
+                logger.warning(f"  [!] Proses '{p.name}' (PID={p.pid}) tidak merespon terminate, mengirim SIGKILL...")
+                p.kill()
+                p.join()
+
     log_shutdown(reason="Signal interrupt" if signum else "Keyboard interrupt")
     logger.info("Semua proses dihentikan. Selamat tinggal!")
     sys.exit(0)
@@ -127,8 +135,8 @@ def main():
         while True:
             for p in _processes:
                 if not p.is_alive():
-                    logger.warning(f"  [!] Proses '{p.name}' mati (exitcode={p.exitcode}), restart...")
-                    # TODO: implementasi restart logic di sini jika perlu
+                    logger.error(f"  [!] Proses '{p.name}' mati secara tidak terduga (exitcode={p.exitcode}). Menghentikan seluruh sistem...")
+                    _shutdown(None, None)
             # Check setiap 5 detik
             import time; time.sleep(5)
     except KeyboardInterrupt:
