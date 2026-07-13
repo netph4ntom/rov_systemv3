@@ -161,6 +161,12 @@ AUTONOMOUS_REPLAY_SPEED_PWM            = 1580  # PWM forward saat replay (maju k
 AUTONOMOUS_RETURN_SPEED_PWM            = 1580  # PWM forward saat return (balik ke docking, ROV berbalik arah)
 AUTONOMOUS_KP_YAW                      = 3.0   # gain koreksi yaw: derajat error → PWM delta
 AUTONOMOUS_MAX_YAW_CORRECTION          = 350   # maks delta PWM untuk koreksi yaw
+AUTONOMOUS_KP_DEPTH                    = 400.0 # gain: error kedalaman (meter) -> PWM delta
+AUTONOMOUS_KP_LATERAL                  = 3.0   # gain: error arah lateral -> PWM delta
+AUTONOMOUS_KP_XTE                      = 350.0 # gain: cross-track error (meter) -> PWM lateral delta
+AUTONOMOUS_MAX_DEPTH_CORRECTION        = 250   # maks delta PWM untuk vertikal
+AUTONOMOUS_MAX_LATERAL_CORRECTION      = 200   # maks delta PWM untuk lateral
+AUTONOMOUS_XTE_THRESHOLD_M             = 0.10  # mulai koreksi jika deviasi > 10 cm
 AUTONOMOUS_LOOP_HZ                     = 10    # iterasi kontrol per detik (100ms/loop)
 
 # QR Fine-Alignment

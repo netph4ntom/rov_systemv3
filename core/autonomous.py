@@ -35,6 +35,7 @@ from config import (
     JOYSTICK_SCALE_MS,
     AUTONOMOUS_RC_CH_LATERAL,
     AUTONOMOUS_RC_CH_FORWARD,
+    AUTONOMOUS_RC_CH_THROTTLE,
     AUTONOMOUS_RC_CH_YAW,
     AUTONOMOUS_WAYPOINT_REACH_THRESHOLD_M,
     AUTONOMOUS_WAYPOINT_SKIP_THRESHOLD_M,
@@ -43,6 +44,12 @@ from config import (
     AUTONOMOUS_RETURN_SPEED_PWM,
     AUTONOMOUS_KP_YAW,
     AUTONOMOUS_MAX_YAW_CORRECTION,
+    AUTONOMOUS_KP_DEPTH,
+    AUTONOMOUS_KP_LATERAL,
+    AUTONOMOUS_KP_XTE,
+    AUTONOMOUS_MAX_DEPTH_CORRECTION,
+    AUTONOMOUS_MAX_LATERAL_CORRECTION,
+    AUTONOMOUS_XTE_THRESHOLD_M,
     AUTONOMOUS_LOOP_HZ,
     AUTONOMOUS_ALIGN_THRESHOLD_PX,
     AUTONOMOUS_ALIGN_TIMEOUT_S,
@@ -180,13 +187,14 @@ class AutonomousController:
 
             self._set_state(MissionState.ALIGNING)
             logger.info("[Autonomous] Fase ALIGNING (QR detection)")
-            if not self._phase_align():
+            last_depth = waypoints[-1]["depth"] if waypoints else None
+            if not self._phase_align(target_depth=last_depth):
                 self._finalize(success=False)
                 return
 
             self._set_state(MissionState.PICKUP)
             logger.info("[Autonomous] Fase PICKUP")
-            self._phase_pickup()
+            self._phase_pickup(target_depth=last_depth)
 
             self._set_state(MissionState.RETURNING)
             logger.info("[Autonomous] Fase RETURNING")
@@ -206,19 +214,34 @@ class AutonomousController:
     # ──────────────────────────────────────────
     def _phase_replay(self, waypoints: list, is_return: bool = False) -> bool:
         """
-        Replay waypoints. Return True jika semua waypoint tercapai, False jika abort.
-        is_return=True -> ROV berbalik arah menuju docking.
+        Replay waypoints dengan kontrol 4 sumbu (Forward, Lateral, Yaw, Depth)
+        serta koreksi Cross-Track Error (XTE) secara proporsional.
+        Return True jika semua waypoint tercapai, False jika abort.
         """
         forward_pwm = AUTONOMOUS_RETURN_SPEED_PWM if is_return else AUTONOMOUS_REPLAY_SPEED_PWM
         phase_name  = "RETURNING" if is_return else "REPLAYING"
+
+        # Rekam posisi awal sebagai referensi W_prev untuk waypoint pertama
+        start_pos = self._traj.get_current_pos()
+        start_yaw = self._traj.get_current_yaw()
+        start_wp = {
+            "x": start_pos["x"],
+            "y": start_pos["y"],
+            "depth": start_pos["depth"],
+            "yaw": start_yaw
+        }
 
         for idx, waypoint in enumerate(waypoints):
             if not self._is_safe():
                 return False
 
             wp_start_time = time.time()
-            logger.debug(f"[Autonomous] [{phase_name}] Waypoint {idx+1}/{len(waypoints)}: "
-                         f"({waypoint['x']:.2f}, {waypoint['y']:.2f})")
+            prev_waypoint = start_wp if idx == 0 else waypoints[idx - 1]
+            
+            logger.debug(
+                f"[Autonomous] [{phase_name}] Waypoint {idx+1}/{len(waypoints)}: "
+                f"({waypoint['x']:.2f}, {waypoint['y']:.2f}, depth={waypoint.get('depth', 0.0):.2f})"
+            )
             self._emit_status(extra={"waypoint_index": idx + 1,
                                      "waypoint_total": len(waypoints)})
 
@@ -231,13 +254,19 @@ class AutonomousController:
                 curr_pos = self._traj.get_current_pos()
                 curr_yaw = self._traj.get_current_yaw()
 
+                # Perhitungan error posisi horizontal
                 dx = waypoint["x"] - curr_pos["x"]
                 dy = waypoint["y"] - curr_pos["y"]
-                dist = math.sqrt(dx * dx + dy * dy)
+                dist_2d = math.sqrt(dx * dx + dy * dy)
 
-                # Waypoint tercapai
-                if dist < AUTONOMOUS_WAYPOINT_REACH_THRESHOLD_M:
-                    logger.debug(f"[Autonomous] [{phase_name}] Waypoint {idx+1} tercapai (dist={dist:.3f}m)")
+                # Perhitungan error posisi vertikal (kedalaman)
+                target_depth = waypoint.get("depth", curr_pos["depth"])
+                dz = target_depth - curr_pos["depth"]
+
+                # Cek pencapaian waypoint menggunakan jarak 3D
+                dist_3d = math.sqrt(dx * dx + dy * dy + dz * dz)
+                if dist_3d < AUTONOMOUS_WAYPOINT_REACH_THRESHOLD_M:
+                    logger.debug(f"[Autonomous] [{phase_name}] Waypoint {idx+1} tercapai (dist_3d={dist_3d:.3f}m)")
                     break
 
                 # Timeout per waypoint
@@ -245,17 +274,55 @@ class AutonomousController:
                     logger.warning(f"[Autonomous] [{phase_name}] Waypoint {idx+1} timeout, skip.")
                     break
 
-                # Heading menuju waypoint
+                # 1. Kontrol Vertikal (Depth Controller)
+                # target_depth > curr_depth -> perlu menyelam -> kurangi PWM (PWM < 1500)
+                depth_delta = int(dz * AUTONOMOUS_KP_DEPTH)
+                depth_delta = _clamp(depth_delta, -AUTONOMOUS_MAX_DEPTH_CORRECTION, AUTONOMOUS_MAX_DEPTH_CORRECTION)
+                throttle_pwm = RC_NEUTRAL_PWM - depth_delta
+
+                # 2. Kontrol Rotasi (Yaw Controller)
                 target_heading = math.degrees(math.atan2(dy, dx))
                 yaw_error = self._normalize_angle(target_heading - curr_yaw)
-
                 yaw_delta = int(_clamp(yaw_error * AUTONOMOUS_KP_YAW,
                                        -AUTONOMOUS_MAX_YAW_CORRECTION,
                                         AUTONOMOUS_MAX_YAW_CORRECTION))
+
+                # 3. Kontrol Lateral (Cross-Track Error / XTE)
+                lat_delta = 0
+                ux = waypoint["x"] - prev_waypoint["x"]
+                uy = waypoint["y"] - prev_waypoint["y"]
+                u_mag_sq = ux * ux + uy * uy
+
+                if u_mag_sq > 1e-6:
+                    vx = curr_pos["x"] - prev_waypoint["x"]
+                    vy = curr_pos["y"] - prev_waypoint["y"]
+                    # Proyeksi t pada garis segmen
+                    t = (vx * ux + vy * uy) / u_mag_sq
+                    t = _clamp(t, 0.0, 1.0)
+                    
+                    proj_x = prev_waypoint["x"] + t * ux
+                    proj_y = prev_waypoint["y"] + t * uy
+                    
+                    # Vektor error dari path proyeksi ke posisi ROV
+                    err_x = curr_pos["x"] - proj_x
+                    err_y = curr_pos["y"] - proj_y
+                    
+                    # Rotasikan vektor error global ke body frame ROV untuk dapat lateral error
+                    yaw_rad = math.radians(curr_yaw)
+                    lat_error = -err_x * math.sin(yaw_rad) + err_y * math.cos(yaw_rad)
+                    xte_m = abs(lat_error)
+
+                    if xte_m > AUTONOMOUS_XTE_THRESHOLD_M:
+                        # lat_error > 0 -> ROV berada di kanan jalur -> gerak ke kiri (PWM < 1500)
+                        lat_delta = int(-lat_error * AUTONOMOUS_KP_XTE)
+                        lat_delta = _clamp(lat_delta, -AUTONOMOUS_MAX_LATERAL_CORRECTION, AUTONOMOUS_MAX_LATERAL_CORRECTION)
+
+                # Kirim sinyal kontrol 4 sumbu
                 channels = {
-                    AUTONOMOUS_RC_CH_FORWARD: forward_pwm,
-                    AUTONOMOUS_RC_CH_YAW:     RC_NEUTRAL_PWM + yaw_delta,
-                    AUTONOMOUS_RC_CH_LATERAL: RC_NEUTRAL_PWM,
+                    AUTONOMOUS_RC_CH_FORWARD:  forward_pwm,
+                    AUTONOMOUS_RC_CH_YAW:      RC_NEUTRAL_PWM + yaw_delta,
+                    AUTONOMOUS_RC_CH_LATERAL:  RC_NEUTRAL_PWM + lat_delta,
+                    AUTONOMOUS_RC_CH_THROTTLE: throttle_pwm,
                 }
                 self._send_rc(channels)
                 time.sleep(LOOP_INTERVAL)
@@ -263,9 +330,10 @@ class AutonomousController:
         self._send_rc_neutral()
         return True
 
-    def _phase_align(self) -> bool:
+    def _phase_align(self, target_depth: Optional[float] = None) -> bool:
         """
-        Aktifkan QR Detector dan koreksi posisi hingga aligned.
+        Aktifkan QR Detector dan koreksi posisi hingga aligned dengan target.
+        Mempertahankan kedalaman jika target_depth diberikan.
         Return True jika aligned, False jika timeout/abort.
         """
         self._activate_qr_detector()
@@ -289,9 +357,23 @@ class AutonomousController:
 
             qr = self._read_qr_result()
 
+            # Kontrol kedalaman konstan selama alignment
+            throttle_pwm = RC_NEUTRAL_PWM
+            if target_depth is not None:
+                curr_pos = self._traj.get_current_pos()
+                dz = target_depth - curr_pos["depth"]
+                depth_delta = int(dz * AUTONOMOUS_KP_DEPTH)
+                depth_delta = _clamp(depth_delta, -AUTONOMOUS_MAX_DEPTH_CORRECTION, AUTONOMOUS_MAX_DEPTH_CORRECTION)
+                throttle_pwm = RC_NEUTRAL_PWM - depth_delta
+
             if qr is None:
-                # QR belum terdeteksi, kirim RC netral, tunggu
-                self._send_rc_neutral()
+                # QR belum terdeteksi, kirim RC netral (keep depth), tunggu
+                self._send_rc({
+                    AUTONOMOUS_RC_CH_FORWARD:  RC_NEUTRAL_PWM,
+                    AUTONOMOUS_RC_CH_LATERAL:  RC_NEUTRAL_PWM,
+                    AUTONOMOUS_RC_CH_YAW:      RC_NEUTRAL_PWM,
+                    AUTONOMOUS_RC_CH_THROTTLE: throttle_pwm,
+                })
                 time.sleep(LOOP_INTERVAL)
                 continue
 
@@ -304,7 +386,7 @@ class AutonomousController:
                 time.sleep(AUTONOMOUS_STOP_WAIT_S)
                 return True
 
-            # Koreksi proporsional
+            # Koreksi proporsional berdasarkan offset piksel QR
             offset_x = qr.get("offset_x", 0.0)
             lat_delta = int(_clamp(offset_x * AUTONOMOUS_KP_ALIGN_LATERAL,
                                    -AUTONOMOUS_MAX_ALIGN_CORRECTION,
@@ -313,17 +395,18 @@ class AutonomousController:
                                    -AUTONOMOUS_MAX_ALIGN_CORRECTION,
                                     AUTONOMOUS_MAX_ALIGN_CORRECTION))
             channels = {
-                AUTONOMOUS_RC_CH_FORWARD: RC_NEUTRAL_PWM,
-                AUTONOMOUS_RC_CH_LATERAL: RC_NEUTRAL_PWM + lat_delta,
-                AUTONOMOUS_RC_CH_YAW:     RC_NEUTRAL_PWM + yaw_delta,
+                AUTONOMOUS_RC_CH_FORWARD:  RC_NEUTRAL_PWM,
+                AUTONOMOUS_RC_CH_LATERAL:  RC_NEUTRAL_PWM + lat_delta,
+                AUTONOMOUS_RC_CH_YAW:      RC_NEUTRAL_PWM + yaw_delta,
+                AUTONOMOUS_RC_CH_THROTTLE: throttle_pwm,
             }
             self._send_rc(channels)
             self._emit_status(extra={"qr_offset_x": round(offset_x, 1),
                                      "qr_offset_y": round(qr.get("offset_y", 0), 1)})
             time.sleep(LOOP_INTERVAL)
 
-    def _phase_pickup(self):
-        """Open gripper -> maju perlahan -> close gripper."""
+    def _phase_pickup(self, target_depth: Optional[float] = None):
+        """Open gripper -> maju perlahan (depth-hold) -> close gripper."""
         logger.info("[Autonomous] Pickup: open gripper")
         self._emit_event("pickup_start", "Membuka gripper...")
         self._mav.gripper("open")
@@ -333,10 +416,20 @@ class AutonomousController:
         self._emit_event("pickup_advance", "Maju perlahan memasukkan objek ke gripper...")
         end_time = time.time() + AUTONOMOUS_PICKUP_ADVANCE_S
         while time.time() < end_time:
+            # Kontrol kedalaman konstan selama maju perlahan
+            throttle_pwm = RC_NEUTRAL_PWM
+            if target_depth is not None:
+                curr_pos = self._traj.get_current_pos()
+                dz = target_depth - curr_pos["depth"]
+                depth_delta = int(dz * AUTONOMOUS_KP_DEPTH)
+                depth_delta = _clamp(depth_delta, -AUTONOMOUS_MAX_DEPTH_CORRECTION, AUTONOMOUS_MAX_DEPTH_CORRECTION)
+                throttle_pwm = RC_NEUTRAL_PWM - depth_delta
+
             self._send_rc({
-                AUTONOMOUS_RC_CH_FORWARD: AUTONOMOUS_REPLAY_SPEED_PWM,
-                AUTONOMOUS_RC_CH_LATERAL: RC_NEUTRAL_PWM,
-                AUTONOMOUS_RC_CH_YAW:     RC_NEUTRAL_PWM,
+                AUTONOMOUS_RC_CH_FORWARD:  AUTONOMOUS_REPLAY_SPEED_PWM,
+                AUTONOMOUS_RC_CH_LATERAL:  RC_NEUTRAL_PWM,
+                AUTONOMOUS_RC_CH_YAW:      RC_NEUTRAL_PWM,
+                AUTONOMOUS_RC_CH_THROTTLE: throttle_pwm,
             })
             time.sleep(LOOP_INTERVAL)
         self._send_rc_neutral()
@@ -412,11 +505,12 @@ class AutonomousController:
         self._traj.update_velocity(vel_x, vel_y)
 
     def _send_rc_neutral(self):
-        """Kirim semua channel ke posisi netral (stop semua motor lateral/forward)."""
+        """Kirim semua channel ke posisi netral (stop semua motor)."""
         channels = {
-            AUTONOMOUS_RC_CH_FORWARD: RC_NEUTRAL_PWM,
-            AUTONOMOUS_RC_CH_LATERAL: RC_NEUTRAL_PWM,
-            AUTONOMOUS_RC_CH_YAW:     RC_NEUTRAL_PWM,
+            AUTONOMOUS_RC_CH_FORWARD:  RC_NEUTRAL_PWM,
+            AUTONOMOUS_RC_CH_LATERAL:  RC_NEUTRAL_PWM,
+            AUTONOMOUS_RC_CH_YAW:      RC_NEUTRAL_PWM,
+            AUTONOMOUS_RC_CH_THROTTLE: RC_NEUTRAL_PWM,
         }
         self._mav.rc_override(channels)
         self._traj.update_velocity(0.0, 0.0)
