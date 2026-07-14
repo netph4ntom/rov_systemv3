@@ -44,6 +44,10 @@ from config import (
     ZMQ_PORT_FRONT_PUB,
     ZMQ_PORT_BOTTOM_CMD,
     ZMQ_PORT_FRONT_CMD,
+    AUTONOMOUS_RC_CH_LATERAL,
+    AUTONOMOUS_RC_CH_FORWARD,
+    AUTONOMOUS_RC_CH_THROTTLE,
+    AUTONOMOUS_RC_CH_YAW,
 )
 
 logger = get_logger(__name__)
@@ -340,13 +344,23 @@ def create_app(
 
     @sio.on("cmd_rc_override")
     async def on_rc_override(sid, data: dict):
-        channels = {int(k): int(v) for k, v in data.get("channels", {}).items()}
-        logger.info(f"[Routes] cmd_rc_override: {channels}")
+        frontend_channels = {int(k): int(v) for k, v in data.get("channels", {}).items()}
+        logger.info(f"[Routes] cmd_rc_override (frontend): {frontend_channels}")
+        
+        # Map frontend channel keys (1=Lateral, 2=Forward, 3=Throttle, 4=Yaw)
+        # to the configured backend RC channels (ArduSub standard: 6=Lateral, 5=Forward, 3=Throttle, 4=Yaw)
+        channels = {
+            AUTONOMOUS_RC_CH_LATERAL:  frontend_channels.get(1, RC_NEUTRAL_PWM),
+            AUTONOMOUS_RC_CH_FORWARD:  frontend_channels.get(2, RC_NEUTRAL_PWM),
+            AUTONOMOUS_RC_CH_THROTTLE: frontend_channels.get(3, RC_NEUTRAL_PWM),
+            AUTONOMOUS_RC_CH_YAW:      frontend_channels.get(4, RC_NEUTRAL_PWM),
+        }
+        
         if _mav:
             _mav.rc_override(channels)
         if _traj:
-            ch1 = channels.get(1, RC_NEUTRAL_PWM)
-            ch2 = channels.get(2, RC_NEUTRAL_PWM)
+            ch1 = frontend_channels.get(1, RC_NEUTRAL_PWM)
+            ch2 = frontend_channels.get(2, RC_NEUTRAL_PWM)
             _traj.update_velocity(
                 ((ch1 - RC_NEUTRAL_PWM) / 500.0) * JOYSTICK_SCALE_MS,
                 ((ch2 - RC_NEUTRAL_PWM) / 500.0) * JOYSTICK_SCALE_MS,

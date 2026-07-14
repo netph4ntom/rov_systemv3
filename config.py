@@ -148,8 +148,8 @@ FS_MAX_RECOVERY_ATTEMPTS = 3
 #   CH2 = Forward / Backward (Pitch)  → vel_y  (maju positif)
 #   CH3 = Throttle / Vertical
 #   CH4 = Yaw (rotasi kanan positif)
-AUTONOMOUS_RC_CH_LATERAL  = 1
-AUTONOMOUS_RC_CH_FORWARD  = 2
+AUTONOMOUS_RC_CH_LATERAL  = 6
+AUTONOMOUS_RC_CH_FORWARD  = 5
 AUTONOMOUS_RC_CH_THROTTLE = 3
 AUTONOMOUS_RC_CH_YAW      = 4
 
