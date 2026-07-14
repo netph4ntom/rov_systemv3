@@ -341,6 +341,7 @@ def create_app(
     @sio.on("cmd_rc_override")
     async def on_rc_override(sid, data: dict):
         channels = {int(k): int(v) for k, v in data.get("channels", {}).items()}
+        logger.info(f"[Routes] cmd_rc_override: {channels}")
         if _mav:
             _mav.rc_override(channels)
         if _traj:
