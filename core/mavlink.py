@@ -202,7 +202,7 @@ class MAVLinkBridge:
         )
 
     def rc_override(self, channels: Dict[int, int]):
-        if not self._conn:
+        if not self._conn or not self._connected:
             return
         UINT16_MAX = 65535
         # FIX: siapkan 18 channel (MAVLink v2), bukan hanya 8

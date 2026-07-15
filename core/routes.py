@@ -19,6 +19,7 @@ import logging
 import threading
 import asyncio
 import queue
+import time
 from datetime import datetime
 from typing import List, Optional, Tuple
 from fastapi import FastAPI, Request
@@ -69,6 +70,12 @@ _loop: Optional[asyncio.AbstractEventLoop] = None
 _last_telemetry_emit_time = 0.0
 _telemetry_emit_interval = 0.1  # detik
 _telemetry_lock = threading.Lock()
+
+# Throttle untuk cmd_rc_override: maks ~33Hz, hindari banjir perintah ke MAVLink
+# (terutama jika ada klien duplikat — BUG-6 fix)
+_last_rc_override_time = 0.0
+_RC_OVERRIDE_MIN_INTERVAL = 0.030  # detik (~33Hz)
+_rc_override_lock = threading.Lock()
 
 # ZMQ socket references (Core binds PUSH sockets, cameras connect PULL sockets)
 _zmq_ctx: Optional[zmq.Context] = None
@@ -163,7 +170,6 @@ def create_app(
         
         # Batasi pengiriman telemetry ke WebSocket maksimal 10Hz
         global _last_telemetry_emit_time
-        import time
         now = time.time()
         should_emit = False
         with _telemetry_lock:
@@ -344,6 +350,15 @@ def create_app(
 
     @sio.on("cmd_rc_override")
     async def on_rc_override(sid, data: dict):
+        global _last_rc_override_time
+        # BUG-6 Fix: Rate limiting — buang perintah berlebih (maks ~33Hz)
+        # Mencegah banjir MAVLink jika ada duplikat interval atau multiple clients
+        now = time.time()
+        with _rc_override_lock:
+            if now - _last_rc_override_time < _RC_OVERRIDE_MIN_INTERVAL:
+                return
+            _last_rc_override_time = now
+
         frontend_channels = {int(k): int(v) for k, v in data.get("channels", {}).items()}
         logger.info(f"[Routes] cmd_rc_override (frontend): {frontend_channels}")
         
