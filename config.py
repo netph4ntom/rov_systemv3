@@ -143,19 +143,19 @@ FS_MAX_RECOVERY_ATTEMPTS = 3
 # ──────────────────────────────────────────────
 # AUTONOMOUS MISSION — Trajectory Replay
 # ──────────────────────────────────────────────
-# ArduSub Simple ROV (4 Thruster) RC Channel Mapping:
-#   Frame: "Simple" / "ROV" — dikonfigurasi via QGC
+# ArduSub RC Channel Mapping:
+#   Meskipun menggunakan frame "Simple" (4 Thruster), ArduSub tetap menerima 
+#   pilot inputs (Surge & Sway) pada channel standar:
 #
-#   CH1 = Roll input  → Lateral / Strafe     (kanan positif)
-#   CH2 = Pitch input → Forward / Backward   (maju positif)
 #   CH3 = Throttle    → Vertical / Depth     (naik positif)
 #   CH4 = Yaw         → Rotasi               (kanan positif)
+#   CH5 = Forward     → Forward / Backward   (maju positif)
+#   CH6 = Lateral     → Lateral / Strafe     (kanan positif)
 #
 # CATATAN: Frontend mengirim "channel virtual" {1=Lateral, 2=Forward, 3=Throttle, 4=Yaw}.
-# Dengan Simple ROV, mapping frontend 1-4 langsung 1:1 ke channel fisik ArduSub CH1-CH4.
-# (Tidak perlu remapping seperti Vectored BlueROV2 yang memakai CH5/CH6)
-AUTONOMOUS_RC_CH_LATERAL  = 1
-AUTONOMOUS_RC_CH_FORWARD  = 2
+# Mapping di bawah mencocokkan virtual channel tersebut ke channel MAVLink/ArduSub fisik.
+AUTONOMOUS_RC_CH_LATERAL  = 6
+AUTONOMOUS_RC_CH_FORWARD  = 5
 AUTONOMOUS_RC_CH_THROTTLE = 3
 AUTONOMOUS_RC_CH_YAW      = 4
 
