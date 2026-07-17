@@ -363,16 +363,25 @@ def create_app(
         logger.info(f"[Routes] cmd_rc_override (frontend): {frontend_channels}")
         
         # Map frontend channel keys (1=Lateral, 2=Forward, 3=Throttle, 4=Yaw)
-        # to the configured backend RC channels (ArduSub standard: 6=Lateral, 5=Forward, 3=Throttle, 4=Yaw)
-        channels = {
-            AUTONOMOUS_RC_CH_LATERAL:  frontend_channels.get(1, RC_NEUTRAL_PWM),
-            AUTONOMOUS_RC_CH_FORWARD:  frontend_channels.get(2, RC_NEUTRAL_PWM),
-            AUTONOMOUS_RC_CH_THROTTLE: frontend_channels.get(3, RC_NEUTRAL_PWM),
-            AUTONOMOUS_RC_CH_YAW:      frontend_channels.get(4, RC_NEUTRAL_PWM),
-        }
-        
+        # and scale to MANUAL_CONTROL ranges (Surge/Sway/Yaw: -1000 to 1000, Throttle: 0 to 1000)
+        ch_lat = frontend_channels.get(1, RC_NEUTRAL_PWM)
+        ch_fwd = frontend_channels.get(2, RC_NEUTRAL_PWM)
+        ch_thr = frontend_channels.get(3, RC_NEUTRAL_PWM)
+        ch_yaw = frontend_channels.get(4, RC_NEUTRAL_PWM)
+
+        y = int((ch_lat - RC_NEUTRAL_PWM) * 2.5)
+        x = int((ch_fwd - RC_NEUTRAL_PWM) * 2.5)
+        z = int(500 + (ch_thr - RC_NEUTRAL_PWM) * 1.25)
+        r = int((ch_yaw - RC_NEUTRAL_PWM) * 2.5)
+
+        # Clamp to valid MAVLink message limits
+        x = max(-1000, min(1000, x))
+        y = max(-1000, min(1000, y))
+        z = max(0, min(1000, z))
+        r = max(-1000, min(1000, r))
+
         if _mav:
-            _mav.rc_override(channels)
+            _mav.manual_control(x, y, z, r)
         if _traj:
             ch1 = frontend_channels.get(1, RC_NEUTRAL_PWM)
             ch2 = frontend_channels.get(2, RC_NEUTRAL_PWM)

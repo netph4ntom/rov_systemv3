@@ -494,14 +494,30 @@ class AutonomousController:
     # ──────────────────────────────────────────
     def _send_rc(self, channels: dict):
         """
-        Kirim RC override ke MAVLink dan update trajectory velocity
+        Kirim manual control ke MAVLink dan update trajectory velocity
         agar dead reckoning tetap akurat selama autonomous.
         """
-        self._mav.rc_override(channels)
-        ch1 = channels.get(AUTONOMOUS_RC_CH_LATERAL, RC_NEUTRAL_PWM)
-        ch2 = channels.get(AUTONOMOUS_RC_CH_FORWARD, RC_NEUTRAL_PWM)
-        vel_x = ((ch1 - RC_NEUTRAL_PWM) / 500.0) * JOYSTICK_SCALE_MS
-        vel_y = ((ch2 - RC_NEUTRAL_PWM) / 500.0) * JOYSTICK_SCALE_MS
+        ch_lat = channels.get(AUTONOMOUS_RC_CH_LATERAL, RC_NEUTRAL_PWM)
+        ch_fwd = channels.get(AUTONOMOUS_RC_CH_FORWARD, RC_NEUTRAL_PWM)
+        ch_thr = channels.get(AUTONOMOUS_RC_CH_THROTTLE, RC_NEUTRAL_PWM)
+        ch_yaw = channels.get(AUTONOMOUS_RC_CH_YAW, RC_NEUTRAL_PWM)
+
+        # Convert to MANUAL_CONTROL ranges (-1000 to 1000, throttle 0 to 1000)
+        y = int((ch_lat - RC_NEUTRAL_PWM) * 2.5)
+        x = int((ch_fwd - RC_NEUTRAL_PWM) * 2.5)
+        z = int(500 + (ch_thr - RC_NEUTRAL_PWM) * 1.25)
+        r = int((ch_yaw - RC_NEUTRAL_PWM) * 2.5)
+
+        # Clamp values
+        x = max(-1000, min(1000, x))
+        y = max(-1000, min(1000, y))
+        z = max(0, min(1000, z))
+        r = max(-1000, min(1000, r))
+
+        self._mav.manual_control(x, y, z, r)
+
+        vel_x = ((ch_lat - RC_NEUTRAL_PWM) / 500.0) * JOYSTICK_SCALE_MS
+        vel_y = ((ch_fwd - RC_NEUTRAL_PWM) / 500.0) * JOYSTICK_SCALE_MS
         self._traj.update_velocity(vel_x, vel_y)
 
     def _send_rc_neutral(self):
@@ -512,8 +528,7 @@ class AutonomousController:
             AUTONOMOUS_RC_CH_YAW:      RC_NEUTRAL_PWM,
             AUTONOMOUS_RC_CH_THROTTLE: RC_NEUTRAL_PWM,
         }
-        self._mav.rc_override(channels)
-        self._traj.update_velocity(0.0, 0.0)
+        self._send_rc(channels)
 
     # ──────────────────────────────────────────
     # QR detector helpers

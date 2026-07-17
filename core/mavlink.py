@@ -220,6 +220,27 @@ class MAVLinkBridge:
                 rc[4], rc[5], rc[6], rc[7],
             )
 
+    def manual_control(self, x: int, y: int, z: int, r: int, buttons: int = 0):
+        """
+        Kirim pesan MANUAL_CONTROL ke Pixhawk (ArduSub).
+        x (Surge/Forward) : -1000 s/d 1000
+        y (Sway/Lateral)  : -1000 s/d 1000
+        z (Heave/Throttle): 0 s/d 1000 (500 adalah netral/hover)
+        r (Yaw/Rotasi)    : -1000 s/d 1000
+        buttons           : bitfield 16-bit untuk tombol (misal gripper/lampu)
+        """
+        if not self._conn or not self._connected:
+            return
+        with self._lock:
+            self._conn.mav.manual_control_send(
+                self._conn.target_system,
+                int(x),
+                int(y),
+                int(z),
+                int(r),
+                int(buttons)
+            )
+
     def _command_long(self, command: int, **params):
         if not self._conn or not self._connected:
             logger.warning("[MAVLink] Tidak terhubung, command diabaikan.")

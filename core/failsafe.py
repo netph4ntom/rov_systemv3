@@ -465,18 +465,25 @@ class FailsafeWatchdog:
 
     def _execute_critical(self, reason: str):
         """
-        CRITICAL: stop semua thruster (RC Override netral) + set MANUAL.
+        CRITICAL: stop semua thruster (RC Override netral + Manual Control netral) + set MANUAL.
         Tidak DISARM - biarkan Pixhawk punya kendali penuh.
         """
         logger.error(f"[Failsafe] CRITICAL: {reason}")
 
         if self._mav and self._mav.is_connected:
-            # Stop semua thruster
+            # Stop semua thruster via RC override
             try:
                 self._mav.rc_override({ch: RC_NEUTRAL_PWM for ch in range(1, 9)})
                 logger.info("[Failsafe] RC Override NEUTRAL dikirim")
             except Exception as e:
                 logger.error(f"[Failsafe] RC Override gagal: {e}")
+
+            # Stop semua thruster via MANUAL_CONTROL
+            try:
+                self._mav.manual_control(0, 0, 500, 0)
+                logger.info("[Failsafe] Manual Control NEUTRAL dikirim")
+            except Exception as e:
+                logger.error(f"[Failsafe] Manual Control NEUTRAL gagal: {e}")
 
             # Ganti mode ke MANUAL
             try:
@@ -489,12 +496,12 @@ class FailsafeWatchdog:
             "timestamp": _now(), "subsystem": "system",
             "severity":  Severity.CRITICAL.name,
             "message":   reason,
-            "action":    "rc_neutral + set_manual",
+            "action":    "rc_neutral + manual_neutral + set_manual",
         })
 
     def _execute_emergency(self, reason: str):
         """
-        EMERGENCY: RC Override netral + DISARM + emit event khusus ke React.
+        EMERGENCY: RC Override netral + Manual Control netral + DISARM + emit event khusus ke React.
         Dashboard akan tampilkan alert merah + tombol "CLEAR EMERGENCY".
         """
         with self._lock:
@@ -508,6 +515,10 @@ class FailsafeWatchdog:
                 self._mav.rc_override({ch: RC_NEUTRAL_PWM for ch in range(1, 9)})
             except Exception as e:
                 logger.error(f"[Failsafe] Emergency RC Override gagal: {e}")
+            try:
+                self._mav.manual_control(0, 0, 500, 0)
+            except Exception as e:
+                logger.error(f"[Failsafe] Emergency Manual Control NEUTRAL gagal: {e}")
             try:
                 self._mav.disarm()
                 logger.info("[Failsafe] DISARM terkirim ke Pixhawk")
