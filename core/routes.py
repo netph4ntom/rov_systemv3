@@ -360,7 +360,7 @@ def create_app(
             _last_rc_override_time = now
 
         frontend_channels = {int(k): int(v) for k, v in data.get("channels", {}).items()}
-        logger.info(f"[Routes] cmd_rc_override (frontend): {frontend_channels}")
+        logger.debug(f"[Routes] cmd_rc_override (frontend): {frontend_channels}")
         
         # Map frontend channel keys (1=Lateral, 2=Forward, 3=Throttle, 4=Yaw)
         # and scale to MANUAL_CONTROL ranges (Surge/Sway/Yaw: -1000 to 1000, Throttle: 0 to 1000)

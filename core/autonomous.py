@@ -100,8 +100,8 @@ class AutonomousController:
         traj : TrajectoryEstimator
         fs   : FailsafeWatchdog
         sio_emit        : lambda event, data -> None (SocketIO emit)
-        qr_front_result_queue : queue hasil QR dari camera_front
-        cmd_front_queue       : queue perintah ke camera_front
+        qr_front_result_queue : queue local untuk menerima hasil QR dari camera_front (disuplai dari ZMQ PUB)
+        cmd_front_queue       : queue local untuk mengirim perintah ke camera_front (diteruskan via ZMQ PUSH)
         """
         self._mav  = mav
         self._tele = tele

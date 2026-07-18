@@ -153,14 +153,15 @@ def test_qr_detectors():
     # Bottom QR Detector
     try:
         from camera_bottom.qr_detector import QRDetector as BottomQRDetector
+        from camera_bottom.image_processing import BottomImageProcessor
+        proc_bottom = BottomImageProcessor(show_hud=True)
         q_bottom_res = manager.Queue()
         q_bottom_dock = manager.Queue()
         det_bottom = BottomQRDetector(qr_result_queue=q_bottom_res, dock_event_queue=q_bottom_dock)
         
         dummy_frame = np.zeros((480, 640, 3), dtype=np.uint8)
-        dummy_gray = np.zeros((480, 640), dtype=np.uint8)
         
-        qr_data, is_dock_aligned, bbox = det_bottom.scan(dummy_frame, dummy_gray)
+        qr_data, is_dock_aligned, bbox = det_bottom.scan(dummy_frame, proc_bottom)
         logger.info(f" - [OK] Bottom QRDetector scan executed. Result: {qr_data}, Aligned: {is_dock_aligned}")
     except Exception as e:
         logger.error(f" - [FAIL] Bottom QRDetector error: {e}")

@@ -3,13 +3,13 @@
 # Sekaligus menghitung apakah ROV sudah aligned di atas dock (center check).
 #
 # Output:
-#   - Decode string QR → masuk ke qr_result_queue
-#   - Dock alignment event → masuk ke dock_event_queue
+#   - Decode string QR → dikirim via ZmqQueueWrapper (ZMQ PUB topik "qr_result")
+#   - Dock alignment event → dikirim via ZmqQueueWrapper (ZMQ PUB topik "dock_event")
 #
-# Fix dari versi sebelumnya:
-#   - scan() sekarang return 3 nilai: (qr_data, is_dock_aligned, bbox)
-#   - bbox dikonversi dari pyzbar rect → np.ndarray shape (1, 4, 2)
-#     agar kompatibel dengan cv2.polylines di _draw_qr_bbox
+# Detail:
+#   - scan() return 3 nilai: (qr_data, is_dock_aligned, bbox)
+#   - bbox dikonversi dari pyzbar rect / WeChat points → np.ndarray shape (1, 4, 2)
+#     agar kompatibel dengan cv2.polylines.
 
 import time
 import logging

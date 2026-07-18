@@ -5,7 +5,7 @@
 # Arsitektur:
 #   - Instance hidup di proses CameraFront (Process 2)
 #   - Diaktifkan / dinonaktifkan via cmd_front queue
-#   - Hasil deteksi dikirim ke core via qr_front_result_queue
+#   - Hasil deteksi dikirim ke core via ZMQ PUB topik "qr_front_result"
 #   - process_frame() dipanggil dari capture_loop setiap frame saat aktif
 
 import time

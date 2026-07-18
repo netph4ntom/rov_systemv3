@@ -116,15 +116,17 @@ class TrajectoryEstimator:
             self._pos_y     += dy
             self._pos_depth  = depth  # depth langsung dari sensor, tidak di-integrate
 
-            # Simpan titik ke path history
-            point = {
-                "x":         round(self._pos_x, 3),
-                "y":         round(self._pos_y, 3),
-                "depth":     round(self._pos_depth, 3),
-                "yaw":       round(self._yaw, 1),
-                "timestamp": round(now, 3),
-            }
-            self._path.append(point)
+            # Simpan titik ke path history hanya pada interval TRAJECTORY_UPDATE_INTERVAL (10Hz)
+            # Ini mencegah deque maxlen=500 penuh terlalu cepat (10s) pada frekuensi telemetri 50Hz
+            if self._last_emit_time == 0.0 or (now - self._last_emit_time) >= TRAJECTORY_UPDATE_INTERVAL:
+                point = {
+                    "x":         round(self._pos_x, 3),
+                    "y":         round(self._pos_y, 3),
+                    "depth":     round(self._pos_depth, 3),
+                    "yaw":       round(self._yaw, 1),
+                    "timestamp": round(now, 3),
+                }
+                self._path.append(point)
 
         # Emit ke React dengan rate limiting
         self._maybe_emit()

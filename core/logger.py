@@ -214,18 +214,20 @@ def setup_logging(
 
         # ── Root logger ───────────────────────────────────────────────────────
         root_logger = logging.getLogger()
-        root_logger.setLevel(_level)
+        # Set root logger ke DEBUG agar semua level (termasuk detail DEBUG) diproses oleh handler
+        root_logger.setLevel(logging.DEBUG)
 
         # Hapus handler lama (hindari duplikasi saat restart proses)
         root_logger.handlers.clear()
 
         # ── Handler 1: Terminal (stdout) dengan warna ─────────────────────────
+        # Console diset ke _level (default INFO) agar terminal tetap bersih dan tidak banjir debug log
         console_handler = logging.StreamHandler(sys.stdout)
         console_handler.setLevel(_level)
         console_handler.setFormatter(_ColoredFormatter(use_color=True))
         root_logger.addHandler(console_handler)
 
-        # ── Handler 2: Daily rotating file (semua level) ─────────────────────
+        # ── Handler 2: Daily rotating file (selalu simpan semua detail DEBUG) ─────────────────────
         # RotatingFileHandler untuk membatasi ukuran per file log
         file_handler = logging.handlers.RotatingFileHandler(
             filename=daily_log_file,
@@ -233,7 +235,7 @@ def setup_logging(
             backupCount=_LOG_BACKUP_COUNT,
             encoding="utf-8",
         )
-        file_handler.setLevel(_level)
+        file_handler.setLevel(logging.DEBUG)  # Selalu catat log rinci ke file harian
         file_handler.setFormatter(_PlainFormatter())
         root_logger.addHandler(file_handler)
 

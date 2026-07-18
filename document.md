@@ -30,13 +30,14 @@ graph TD
     subgraph "Process 2 - CameraFront (Port 8001)"
         FrontStream["FastAPI Stream Server"]
         FrontCap["Capture Loop and Preprocessing - CLAHE"]
+        QRDetFront["QRDetector - Grip Alignment"]
         FrontRec["FrontRecorder - Video Writer"]
     end
 
     subgraph "Process 3 - CameraBottom (Port 8002)"
         BottomStream["FastAPI Stream Server"]
         BottomCap["Capture Loop and Preprocessing"]
-        QRDet["QRDetector - Docking Alignment"]
+        QRDetBottom["QRDetector - Docking Alignment"]
         BottomRec["BottomRecorder - Video Writer"]
     end
 
@@ -64,11 +65,12 @@ graph TD
 
     style FrontStream fill:#B4C7E7
     style FrontCap fill:#B4C7E7
+    style QRDetFront fill:#B4C7E7
     style FrontRec fill:#B4C7E7
 
     style BottomStream fill:#C6E0B4
     style BottomCap fill:#C6E0B4
-    style QRDet fill:#C6E0B4
+    style QRDetBottom fill:#C6E0B4
     style BottomRec fill:#C6E0B4
 ```
 
@@ -88,19 +90,20 @@ Proses utama yang mengendalikan siklus hidup ROV dan jembatan ke operator:
 #### 2. Proses CameraFront (`main.py` -> `run_front_stream_server`)
 - Mengambil bingkai gambar (*frame*) dari sensor kamera depan.
 - Menerapkan manipulasi gambar real-time: CLAHE (*Contrast Limited Adaptive Histogram Equalization*) dan koreksi warna (*boosting* warna merah, reduksi warna biru) untuk menembus keterbatasan jarak pandang kolam.
+- Menjalankan **`QRDetector`** secara dinamis (diaktifkan saat fase ALIGNING misi otonom) untuk mendeteksi QR target objek dan menghitung deviasi koordinat pusat guna memandu gripper secara otomatis.
 - Menyajikan aliran video (*video stream*) berbasis protokol WebRTC untuk latensi rendah (port `8001/offer`) dengan fallback ke MJPEG (port `8001/stream`).
-- Memproses antrean perintah screenshot dan perekaman video (`cmd_front`).
+- Memproses antrean perintah screenshot, perekaman video, serta instruksi aktivasi/deaktivasi QR detector (`cmd_front`).
 
 #### 3. Proses CameraBottom (`main.py` -> `run_bottom_stream_server`)
 - Mengambil frame dari sensor kamera bawah.
 - Menerapkan auto-exposure dinamik agar marker target tidak mengalami *over-exposure* akibat paparan lampu.
-- Menjalankan **`QRDetector`** (`pyzbar`/`wechat_qrcode`) secara berkala untuk mendeteksi QR code dan menghitung deviasi jarak titik pusat QR terhadap pusat frame kamera guna menentukan tingkat kelurusan (*docking alignment*).
+- Menjalankan **`QRDetector`** (`pyzbar`/`wechat_qrcode`) secara berkala (selalu aktif) untuk mendeteksi QR code dermaga (docking) dan menghitung deviasi jarak titik pusat QR terhadap pusat frame kamera guna menentukan tingkat kelurusan (*docking alignment*).
 - Menyediakan WebRTC stream (port `8002/offer`) dan MJPEG stream (port `8002/stream`) lengkap dengan HUD overlay status alignment dan bounding box QR code.
 
 ### 1.4. Komunikasi Antar-Proses (ZeroMQ IPC)
 Untuk meminimalkan interferensi antar-proses, sistem tidak menggunakan Shared Memory bawaan Python yang lambat, melainkan menggunakan **ZeroMQ (ZMQ)**:
-- **Command Path (PUSH/PULL)**: `CoreAPI` mengikat (*bind*) socket PUSH pada port `5558` (depan) dan `5557` (bawah) untuk mengirim perintah asinkron seperti screenshot dan perintah rekam. Proses kamera bertindak sebagai PULL client yang mendengarkan perintah tersebut secara non-blocking.
-- **Event Path (PUB/SUB)**: Proses kamera mengikat (*bind*) socket PUB pada port `5556` (depan) dan `5555` (bawah). `CoreAPI` bertindak sebagai SUB client untuk menangkap hasil scan QR (`qr_result`), status alignment (`dock_event`), serta laporan selesai rekam (`camera_result`).
+- **Command Path (PUSH/PULL)**: `CoreAPI` mengikat (*bind*) socket PUSH pada port `5558` (depan) dan `5557` (bawah) untuk mengirim perintah asinkron seperti screenshot, perintah rekam, serta aktivasi/deaktivasi QR. Proses kamera bertindak sebagai PULL client yang mendengarkan perintah tersebut secara non-blocking.
+- **Event Path (PUB/SUB)**: Proses kamera mengikat (*bind*) socket PUB pada port `5556` (depan) dan `5555` (bawah). `CoreAPI` bertindak sebagai SUB client untuk menangkap hasil scan QR kamera bawah (`qr_result`), status alignment dermaga (`dock_event`), hasil scan QR kamera depan (`qr_front_result`), serta laporan selesai rekam (`camera_result`).
 
 ### 1.5. Layanan Autostart (Systemd Service)
 Pada Raspberry Pi 5, sistem berjalan otomatis saat boot menggunakan **systemd service** yang ditempatkan di `/etc/systemd/system/rov.service`.
@@ -184,12 +187,13 @@ Failsafe watchdog bertindak sebagai asuransi keamanan fisik hardware ROV dengan 
 ### 2.4. Logika Misi Otonom & Alignment QR Code (`autonomous.py`)
 Layanan otonom mengendalikan ROV untuk mengikuti lintasan yang direkam dan melakukan docking presisi:
 1. **Waypoint Replay**: Backend menyuplai instruksi kendali ke Pixhawk dengan mencocokkan koordinat estimasi saat ini terhadap koordinat waypoint rekaman. Kecepatan dikontrol oleh `AUTONOMOUS_REPLAY_SPEED_PWM` (1580).
-2. **QR Code Fine-Alignment**: Ketika kamera bawah mendeteksi QR code target, sistem memasuki mode alignment:
+2. **QR Code Fine-Alignment**: Ketika kamera depan mendeteksi QR code target objek, sistem memasuki mode alignment:
+   * Detektor QR kamera depan diaktifkan secara dinamis via perintah ZMQ `qr_activate`.
    * Koordinat offset ($X_{offset}, Y_{offset}$) dari pusat QR ke pusat frame dihitung.
    * Koreksi translasi lateral (CH1) dihitung menggunakan kontrol proporsional:
      $$\Delta \text{PWM}_{\text{lateral}} = X_{offset} \times \text{AUTONOMOUS\_KP\_ALIGN\_LATERAL}$$
    * Koreksi rotasi yaw (CH4) dibantu menggunakan parameter `AUTONOMOUS_KP_ALIGN_YAW`.
-3. **Pickup / Docking Sequence**: Setelah ROV lurus terhadap QR ($\le 30\text{ px}$ offset), ROV maju secara perlahan, membuka gripper (`cmd_gripper` open), menunggu waktu delay, menjepit target, lalu melakukan mode kembali (*Return to Home*).
+3. **Pickup / Docking Sequence**: Setelah ROV lurus terhadap QR kamera depan ($\le 30\text{ px}$ offset), ROV maju secara perlahan, membuka gripper (`cmd_gripper` open), menunggu waktu delay, menjepit target, menonaktifkan QR detector (`qr_deactivate`), lalu melakukan mode kembali (*Return to Home*).
 
 ---
 

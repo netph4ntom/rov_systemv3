@@ -242,13 +242,14 @@ def _zmq_command_loop():
 def _send_result(action: str, filepath: Optional[str]):
     if _result_queue is None:
         return
+    import os
     status = "ok" if filepath else "error"
     payload = {
         "camera": "bottom",
         "action": action,
         "status": status,
         "filepath": filepath or "",
-        "filename": filepath.split("/")[-1] if filepath else "",
+        "filename": os.path.basename(filepath) if filepath else "",
     }
     _result_queue.put_nowait(payload)
 

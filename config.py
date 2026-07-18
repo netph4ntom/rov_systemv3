@@ -119,7 +119,7 @@ JOYSTICK_SCALE_MS = 1.0              # Skala velocity untuk dead reckoning traje
 # ──────────────────────────────────────────────
 # TRAJECTORY
 # ──────────────────────────────────────────────
-TRAJECTORY_HISTORY_SIZE    = 500     # jumlah titik path yang disimpan
+TRAJECTORY_HISTORY_SIZE    = 10000    # jumlah titik path yang disimpan (cukup untuk ~16.6 menit pada 10Hz)
 TRAJECTORY_UPDATE_INTERVAL = 0.1     # minimum interval emit ke React (detik)
 
 # ──────────────────────────────────────────────

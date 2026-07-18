@@ -79,7 +79,12 @@ class TelemetryManager:
         # FIX: log press_abs supaya mudah debug saat SITL depth selalu 0
         logger.debug(f"[Telemetry] press_abs={pressure_mbar:.2f} mbar → depth={depth_m:.3f} m")
         with self._lock:
-            self._state["depth"] = depth_m
+            # Low-pass filter (Alpha = 0.85) untuk meredam noise turbulensi air pada sensor tekanan
+            prev_depth = self._state["depth"]
+            if prev_depth == 0.0:
+                self._state["depth"] = depth_m
+            else:
+                self._state["depth"] = round((prev_depth * 0.85) + (depth_m * 0.15), 3)
         self._notify()
 
     def _handle_battery_status(self, msg):

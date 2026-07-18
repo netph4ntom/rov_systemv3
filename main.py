@@ -7,12 +7,14 @@
 # │     ├── TelemetryManager     → parse MAVLink → state ROV
 # │     ├── TrajectoryEstimator  → dead reckoning posisi
 # │     └── WebSocket            → push semua ke React
-# ├── Process 2: camera_front    → MJPEG stream (port 8001)
-# └── Process 3: camera_bottom   → MJPEG stream + QR scan (port 8002)
+# ├── Process 2: camera_front    → MJPEG/WebRTC stream + dynamic QR scan (port 8001)
+# └── Process 3: camera_bottom   → MJPEG/WebRTC stream + continuous QR scan (port 8002)
 
-# IPC Queue (cross-process):
-# camera_bottom ──(qr_result_queue)──► core ──► React
-# camera_bottom ──(dock_event_queue)─► core ──► React
+# IPC via ZeroMQ (ZMQ) TCP Socket:
+# camera_bottom ──(PUB: qr_result, dock_event)──► SUB: core ──► React Socket.IO
+# camera_front  ──(PUB: qr_front_result)────────► SUB: core ──► AutonomousController
+# core          ──(PUSH: command channels)───────► PULL: cameras
+#
 # In-process callback (threading, dalam core):
 # MAVLinkBridge ──► TelemetryManager ──► TrajectoryEstimator ──► SocketIO emit
 # ──────────────────────────────────────────────────────────
