@@ -51,10 +51,13 @@ class BottomImageProcessor:
 
         self.frame_count += 1
 
-        # 1. Sharpen untuk bantu QR reader
+        # 1. Color correction (Gray World AWB)
+        frame = self._color_correction(frame)
+
+        # 2. Sharpen untuk bantu QR reader
         frame = self._sharpen(frame)
 
-        # 2. Gambar bounding box jika QR code terdeteksi
+        # 3. Gambar bounding box jika QR code terdeteksi
         frame = self._draw_qr_bbox(frame)
 
         # 3. Gambar crosshair center sebagai panduan docking
@@ -88,6 +91,28 @@ class BottomImageProcessor:
     # ──────────────────────────────────────────
     # Drawing helpers
     # ──────────────────────────────────────────
+    def _color_correction(self, frame: np.ndarray) -> np.ndarray:
+        # Mengkonversi ke float untuk akurasi perhitungan rata-rata
+        f = frame.astype(np.float32)
+        b_avg = np.mean(f[:, :, 0])
+        g_avg = np.mean(f[:, :, 1])
+        r_avg = np.mean(f[:, :, 2])
+        
+        # Hindari division by zero
+        b_avg = max(b_avg, 1.0)
+        g_avg = max(g_avg, 1.0)
+        r_avg = max(r_avg, 1.0)
+        
+        # Hitung gain
+        k = (b_avg + g_avg + r_avg) / 3.0
+        
+        # Terapkan gain dan clipping
+        f[:, :, 0] = np.clip(f[:, :, 0] * (k / b_avg), 0, 255)
+        f[:, :, 1] = np.clip(f[:, :, 1] * (k / g_avg), 0, 255)
+        f[:, :, 2] = np.clip(f[:, :, 2] * (k / r_avg), 0, 255)
+        
+        return f.astype(np.uint8)
+
     def _sharpen(self, frame: np.ndarray) -> np.ndarray:
         kernel = np.array([[0, -1, 0],
                            [-1, 5,-1],

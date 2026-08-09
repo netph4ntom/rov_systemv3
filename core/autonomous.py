@@ -71,13 +71,13 @@ LOOP_INTERVAL = 1.0 / AUTONOMOUS_LOOP_HZ  # detik per iterasi kontrol
 # ================================================================
 
 class MissionState:
-    IDLE      = "IDLE"
-    REPLAYING = "REPLAYING"
-    ALIGNING  = "ALIGNING"
-    PICKUP    = "PICKUP"
-    RETURNING = "RETURNING"
-    COMPLETE  = "COMPLETE"
-    ABORTING  = "ABORTING"
+    IDLE          = "IDLE"
+    REPLAYING     = "REPLAYING"
+    WALL_APPROACH = "WALL_APPROACH"
+    UNHOOK        = "UNHOOK"
+    SURFACE       = "SURFACE"
+    COMPLETE      = "COMPLETE"
+    ABORTING      = "ABORTING"
 
 
 # ================================================================
@@ -185,21 +185,19 @@ class AutonomousController:
                 self._finalize(success=False)
                 return
 
-            self._set_state(MissionState.ALIGNING)
-            logger.info("[Autonomous] Fase ALIGNING (QR detection)")
-            last_depth = waypoints[-1]["depth"] if waypoints else None
-            if not self._phase_align(target_depth=last_depth):
+            self._set_state(MissionState.WALL_APPROACH)
+            logger.info("[Autonomous] Fase WALL_APPROACH (Dead reckoning ke dinding)")
+            if not self._phase_wall_approach():
                 self._finalize(success=False)
                 return
 
-            self._set_state(MissionState.PICKUP)
-            logger.info("[Autonomous] Fase PICKUP")
-            self._phase_pickup(target_depth=last_depth)
+            self._set_state(MissionState.UNHOOK)
+            logger.info("[Autonomous] Fase UNHOOK (Melepas Payload dari Dinding)")
+            self._phase_unhook()
 
-            self._set_state(MissionState.RETURNING)
-            logger.info("[Autonomous] Fase RETURNING")
-            reversed_wp = list(reversed(waypoints))
-            self._phase_replay(reversed_wp, is_return=True)
+            self._set_state(MissionState.SURFACE)
+            logger.info("[Autonomous] Fase SURFACE (Naik ke permukaan)")
+            self._phase_surface()
 
             success = True
 
@@ -212,14 +210,14 @@ class AutonomousController:
     # ──────────────────────────────────────────
     # Phases
     # ──────────────────────────────────────────
-    def _phase_replay(self, waypoints: list, is_return: bool = False) -> bool:
+    def _phase_replay(self, waypoints: list) -> bool:
         """
         Replay waypoints dengan kontrol 4 sumbu (Forward, Lateral, Yaw, Depth)
         serta koreksi Cross-Track Error (XTE) secara proporsional.
         Return True jika semua waypoint tercapai, False jika abort.
         """
-        forward_pwm = AUTONOMOUS_RETURN_SPEED_PWM if is_return else AUTONOMOUS_REPLAY_SPEED_PWM
-        phase_name  = "RETURNING" if is_return else "REPLAYING"
+        forward_pwm = AUTONOMOUS_REPLAY_SPEED_PWM
+        phase_name  = "REPLAYING"
 
         # Rekam posisi awal sebagai referensi W_prev untuk waypoint pertama
         start_pos = self._traj.get_current_pos()
@@ -275,7 +273,6 @@ class AutonomousController:
                     break
 
                 # 1. Kontrol Vertikal (Depth Controller)
-                # target_depth > curr_depth -> perlu menyelam -> kurangi PWM (PWM < 1500)
                 depth_delta = int(dz * AUTONOMOUS_KP_DEPTH)
                 depth_delta = _clamp(depth_delta, -AUTONOMOUS_MAX_DEPTH_CORRECTION, AUTONOMOUS_MAX_DEPTH_CORRECTION)
                 throttle_pwm = RC_NEUTRAL_PWM - depth_delta
@@ -330,117 +327,86 @@ class AutonomousController:
         self._send_rc_neutral()
         return True
 
-    def _phase_align(self, target_depth: Optional[float] = None) -> bool:
+    def _phase_wall_approach(self) -> bool:
         """
-        Aktifkan QR Detector dan koreksi posisi hingga aligned dengan target.
-        Mempertahankan kedalaman jika target_depth diberikan.
-        Return True jika aligned, False jika timeout/abort.
+        Maju ke dinding menggunakan dead reckoning lambat.
+        (Nantinya akan diganti dengan panduan Object Detection YOLO)
         """
-        self._activate_qr_detector()
-        # Flush queue lama
-        self._flush_qr_queue()
-        self._emit_event("qr_searching", "Mencari QR Code untuk alignment...")
-
-        start = time.time()
-        while True:
-            if not self._is_safe():
-                self._deactivate_qr_detector()
-                self._send_rc_neutral()
-                return False
-
-            if time.time() - start > AUTONOMOUS_ALIGN_TIMEOUT_S:
-                logger.warning("[Autonomous] ALIGNING timeout — abort")
-                self._emit_event("align_timeout", "Alignment QR timeout")
-                self._deactivate_qr_detector()
-                self._send_rc_neutral()
-                return False
-
-            qr = self._read_qr_result()
-
-            # Kontrol kedalaman konstan selama alignment
-            throttle_pwm = RC_NEUTRAL_PWM
-            if target_depth is not None:
-                curr_pos = self._traj.get_current_pos()
-                dz = target_depth - curr_pos["depth"]
-                depth_delta = int(dz * AUTONOMOUS_KP_DEPTH)
-                depth_delta = _clamp(depth_delta, -AUTONOMOUS_MAX_DEPTH_CORRECTION, AUTONOMOUS_MAX_DEPTH_CORRECTION)
-                throttle_pwm = RC_NEUTRAL_PWM - depth_delta
-
-            if qr is None:
-                # QR belum terdeteksi, kirim RC netral (keep depth), tunggu
-                self._send_rc({
-                    AUTONOMOUS_RC_CH_FORWARD:  RC_NEUTRAL_PWM,
-                    AUTONOMOUS_RC_CH_LATERAL:  RC_NEUTRAL_PWM,
-                    AUTONOMOUS_RC_CH_YAW:      RC_NEUTRAL_PWM,
-                    AUTONOMOUS_RC_CH_THROTTLE: throttle_pwm,
-                })
-                time.sleep(LOOP_INTERVAL)
-                continue
-
-            if qr.get("aligned", False):
-                logger.info(f"[Autonomous] ALIGNED: QR={qr.get('data','')} "
-                            f"offset=({qr.get('offset_x',0):.1f}, {qr.get('offset_y',0):.1f})")
-                self._emit_event("qr_aligned", "Posisi sejajar dengan target QR")
-                self._deactivate_qr_detector()
-                self._send_rc_neutral()
-                time.sleep(AUTONOMOUS_STOP_WAIT_S)
-                return True
-
-            # Koreksi proporsional berdasarkan offset piksel QR
-            offset_x = qr.get("offset_x", 0.0)
-            lat_delta = int(_clamp(offset_x * AUTONOMOUS_KP_ALIGN_LATERAL,
-                                   -AUTONOMOUS_MAX_ALIGN_CORRECTION,
-                                    AUTONOMOUS_MAX_ALIGN_CORRECTION))
-            yaw_delta = int(_clamp(offset_x * AUTONOMOUS_KP_ALIGN_YAW,
-                                   -AUTONOMOUS_MAX_ALIGN_CORRECTION,
-                                    AUTONOMOUS_MAX_ALIGN_CORRECTION))
-            channels = {
-                AUTONOMOUS_RC_CH_FORWARD:  RC_NEUTRAL_PWM,
-                AUTONOMOUS_RC_CH_LATERAL:  RC_NEUTRAL_PWM + lat_delta,
-                AUTONOMOUS_RC_CH_YAW:      RC_NEUTRAL_PWM + yaw_delta,
-                AUTONOMOUS_RC_CH_THROTTLE: throttle_pwm,
-            }
-            self._send_rc(channels)
-            self._emit_status(extra={"qr_offset_x": round(offset_x, 1),
-                                     "qr_offset_y": round(qr.get("offset_y", 0), 1)})
-            time.sleep(LOOP_INTERVAL)
-
-    def _phase_pickup(self, target_depth: Optional[float] = None):
-        """Open gripper -> maju perlahan (depth-hold) -> close gripper."""
-        logger.info("[Autonomous] Pickup: open gripper")
-        self._emit_event("pickup_start", "Membuka gripper...")
-        self._mav.gripper("open")
-        time.sleep(AUTONOMOUS_GRIPPER_WAIT_S)
-
-        logger.info("[Autonomous] Pickup: maju perlahan masuki gripper")
-        self._emit_event("pickup_advance", "Maju perlahan memasukkan objek ke gripper...")
-        end_time = time.time() + AUTONOMOUS_PICKUP_ADVANCE_S
+        self._emit_event("wall_approach", "Bergerak maju perlahan menuju dinding...")
+        end_time = time.time() + 5.0 # Maju 5 detik
         while time.time() < end_time:
-            # Kontrol kedalaman konstan selama maju perlahan
-            throttle_pwm = RC_NEUTRAL_PWM
-            if target_depth is not None:
-                curr_pos = self._traj.get_current_pos()
-                dz = target_depth - curr_pos["depth"]
-                depth_delta = int(dz * AUTONOMOUS_KP_DEPTH)
-                depth_delta = _clamp(depth_delta, -AUTONOMOUS_MAX_DEPTH_CORRECTION, AUTONOMOUS_MAX_DEPTH_CORRECTION)
-                throttle_pwm = RC_NEUTRAL_PWM - depth_delta
-
+            if not self._is_safe():
+                return False
             self._send_rc({
                 AUTONOMOUS_RC_CH_FORWARD:  AUTONOMOUS_REPLAY_SPEED_PWM,
                 AUTONOMOUS_RC_CH_LATERAL:  RC_NEUTRAL_PWM,
                 AUTONOMOUS_RC_CH_YAW:      RC_NEUTRAL_PWM,
-                AUTONOMOUS_RC_CH_THROTTLE: throttle_pwm,
+                AUTONOMOUS_RC_CH_THROTTLE: RC_NEUTRAL_PWM,
+            })
+            time.sleep(LOOP_INTERVAL)
+        self._send_rc_neutral()
+        time.sleep(AUTONOMOUS_STOP_WAIT_S)
+        return True
+
+    def _phase_unhook(self):
+        """Membuka capit, maju menelan payload, tutup capit, lalu mundur."""
+        logger.info("[Autonomous] Unhook: open gripper")
+        self._emit_event("unhook_start", "Membuka capit...")
+        self._mav.gripper("open")
+        time.sleep(AUTONOMOUS_GRIPPER_WAIT_S)
+        
+        self._emit_event("unhook_advance", "Maju perlahan menelan payload...")
+        end_time = time.time() + 2.0
+        while time.time() < end_time:
+            if not self._is_safe():
+                return
+            self._send_rc({
+                AUTONOMOUS_RC_CH_FORWARD:  AUTONOMOUS_REPLAY_SPEED_PWM,
+                AUTONOMOUS_RC_CH_LATERAL:  RC_NEUTRAL_PWM,
+                AUTONOMOUS_RC_CH_YAW:      RC_NEUTRAL_PWM,
+                AUTONOMOUS_RC_CH_THROTTLE: RC_NEUTRAL_PWM,
             })
             time.sleep(LOOP_INTERVAL)
         self._send_rc_neutral()
         time.sleep(AUTONOMOUS_STOP_WAIT_S)
 
-        logger.info("[Autonomous] Pickup: close gripper")
-        self._emit_event("pickup_close", "Menutup gripper, mengamankan objek...")
+        logger.info("[Autonomous] Unhook: close gripper")
+        self._emit_event("unhook_close", "Menutup capit, mengamankan payload...")
         self._mav.gripper("close")
         time.sleep(AUTONOMOUS_GRIPPER_WAIT_S)
-        logger.info("[Autonomous] Pickup selesai")
-        self._emit_event("pickup_done", "Objek berhasil diambil")
+
+        self._emit_event("unhook_pull", "Mundur perlahan menarik payload lepas dari dinding...")
+        end_time = time.time() + 3.0
+        while time.time() < end_time:
+            if not self._is_safe():
+                return
+            reverse_pwm = RC_NEUTRAL_PWM - (AUTONOMOUS_REPLAY_SPEED_PWM - RC_NEUTRAL_PWM)
+            self._send_rc({
+                AUTONOMOUS_RC_CH_FORWARD:  reverse_pwm,
+                AUTONOMOUS_RC_CH_LATERAL:  RC_NEUTRAL_PWM,
+                AUTONOMOUS_RC_CH_YAW:      RC_NEUTRAL_PWM,
+                AUTONOMOUS_RC_CH_THROTTLE: RC_NEUTRAL_PWM,
+            })
+            time.sleep(LOOP_INTERVAL)
+        self._send_rc_neutral()
+        time.sleep(AUTONOMOUS_STOP_WAIT_S)
+
+    def _phase_surface(self):
+        """Naik ke permukaan air secara perlahan."""
+        self._emit_event("surface_start", "Mengapung ke permukaan...")
+        end_time = time.time() + 5.0 # Naik 5 detik
+        while time.time() < end_time:
+            if not self._is_safe():
+                break
+            # Naik: Throttle PWM > 1500
+            self._send_rc({
+                AUTONOMOUS_RC_CH_FORWARD:  RC_NEUTRAL_PWM,
+                AUTONOMOUS_RC_CH_LATERAL:  RC_NEUTRAL_PWM,
+                AUTONOMOUS_RC_CH_YAW:      RC_NEUTRAL_PWM,
+                AUTONOMOUS_RC_CH_THROTTLE: RC_NEUTRAL_PWM + 200,
+            })
+            time.sleep(LOOP_INTERVAL)
+        self._send_rc_neutral()
 
     # ──────────────────────────────────────────
     # Safety & finalize

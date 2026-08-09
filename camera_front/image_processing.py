@@ -74,12 +74,29 @@ class FrontImageProcessor:
     # ──────────────────────────────────────────
     def _color_correction(self, frame: np.ndarray) -> np.ndarray:
         """
-        Kompensasi white-balance ringan untuk kolam 1 meter.
-        Modifikasi channel merah dan biru secara langsung di memori gambar (in-place).
+        Dynamic White Balance (Gray World Algorithm) untuk mengatasi perubahan
+        warna air (biru/kehijauan) secara otomatis di berbagai kedalaman.
         """
-        frame[:, :, 2] = cv2.add(frame[:, :, 2], COLOR_CORRECTION_RED_BOOST)
-        frame[:, :, 0] = cv2.subtract(frame[:, :, 0], COLOR_CORRECTION_BLUE_REDUCE)
-        return frame
+        # Mengkonversi ke float untuk akurasi perhitungan rata-rata
+        f = frame.astype(np.float32)
+        b_avg = np.mean(f[:, :, 0])
+        g_avg = np.mean(f[:, :, 1])
+        r_avg = np.mean(f[:, :, 2])
+        
+        # Hindari division by zero
+        b_avg = max(b_avg, 1.0)
+        g_avg = max(g_avg, 1.0)
+        r_avg = max(r_avg, 1.0)
+        
+        # Hitung gain
+        k = (b_avg + g_avg + r_avg) / 3.0
+        
+        # Terapkan gain dan clipping
+        f[:, :, 0] = np.clip(f[:, :, 0] * (k / b_avg), 0, 255)
+        f[:, :, 1] = np.clip(f[:, :, 1] * (k / g_avg), 0, 255)
+        f[:, :, 2] = np.clip(f[:, :, 2] * (k / r_avg), 0, 255)
+        
+        return f.astype(np.uint8)
 
     def _enhance_contrast(self, frame: np.ndarray) -> np.ndarray:
         """
