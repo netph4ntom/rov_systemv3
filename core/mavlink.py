@@ -13,7 +13,9 @@ from config import (
     SERVO_GRIPPER_CHANNEL,
     SERVO_GRIPPER_OPEN_PWM,
     SERVO_GRIPPER_CLOSE_PWM,
-    RELAY_LIGHT_INDEX,
+    SERVO_LIGHT_CHANNEL,
+    SERVO_LIGHT_ON_PWM,
+    SERVO_LIGHT_OFF_PWM,
     RC_NEUTRAL_PWM,
 )
 
@@ -194,11 +196,12 @@ class MAVLinkBridge:
         )
 
     def light(self, state: bool):
-        logger.info(f"[MAVLink] LIGHT {'ON' if state else 'OFF'}")
+        logger.info(f"[MAVLink] LIGHT {'ON' if state else 'OFF'} (Servo)")
+        pwm = SERVO_LIGHT_ON_PWM if state else SERVO_LIGHT_OFF_PWM
         self._command_long(
-            mavutil.mavlink.MAV_CMD_DO_SET_RELAY,
-            param1=float(RELAY_LIGHT_INDEX),
-            param2=1.0 if state else 0.0,
+            mavutil.mavlink.MAV_CMD_DO_SET_SERVO,
+            param1=float(SERVO_LIGHT_CHANNEL),
+            param2=float(pwm),
         )
 
     def rc_override(self, channels: Dict[int, int]):

@@ -203,9 +203,17 @@ def create_app(
             except Exception:
                 pass
 
+    def _on_vision_front_result(payload):
+        if autonomous and hasattr(autonomous, "_vision_queue") and autonomous._vision_queue is not None:
+            try:
+                autonomous._vision_queue.put_nowait(payload)
+            except Exception:
+                pass
+
     register_handlers(
         qr_store_callback=_store_qr_from_queue,
-        qr_front_callback=_on_qr_front_result
+        qr_front_callback=_on_qr_front_result,
+        vision_front_callback=_on_vision_front_result
     )
 
     # ── FastAPI REST Endpoints ─────────────────
@@ -452,6 +460,7 @@ def run_core_server():
 
     # Local queues to bridge between ZMQ listener / routes and AutonomousController
     autonomous_qr_queue = queue.Queue()
+    autonomous_vision_queue = queue.Queue()
 
     autonomous = AutonomousController(
         mav=mav,
@@ -461,6 +470,7 @@ def run_core_server():
         sio_emit=_emit_proxy,
         qr_front_result_queue=autonomous_qr_queue,
         cmd_front_queue=_autonomous_cmd_queue,
+        vision_queue=autonomous_vision_queue,
     )
 
     # Connect in background thread

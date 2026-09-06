@@ -28,13 +28,19 @@ sio = socketio.AsyncServer(async_mode='asgi', cors_allowed_origins='*')
 
 _qr_store_callback: Optional[Callable] = None
 _qr_front_callback: Optional[Callable] = None
+_vision_front_callback: Optional[Callable] = None
 
 
-def register_handlers(qr_store_callback: Optional[Callable] = None, qr_front_callback: Optional[Callable] = None):
+def register_handlers(
+    qr_store_callback: Optional[Callable] = None, 
+    qr_front_callback: Optional[Callable] = None,
+    vision_front_callback: Optional[Callable] = None
+):
     """Register base event handlers."""
-    global _qr_store_callback, _qr_front_callback
+    global _qr_store_callback, _qr_front_callback, _vision_front_callback
     _qr_store_callback = qr_store_callback
     _qr_front_callback = qr_front_callback
+    _vision_front_callback = vision_front_callback
 
     @sio.on("ping_rov")
     async def on_ping(sid, data):
@@ -99,6 +105,14 @@ async def _zmq_listener_loop(bottom_pub_port: int, front_pub_port: int):
                             _qr_front_callback(payload)
                         except Exception as e:
                             logger.warning(f"[WS] QR front callback error: {e}")
+
+                elif topic == "vision_front_result":
+                    # Teruskan hasil YOLO kamera depan ke controller otonom
+                    if _vision_front_callback:
+                        try:
+                            _vision_front_callback(payload)
+                        except Exception as e:
+                            logger.warning(f"[WS] Vision front callback error: {e}")
         except asyncio.CancelledError:
             break
         except Exception as e:

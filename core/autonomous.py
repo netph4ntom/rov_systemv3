@@ -1,27 +1,4 @@
 # core/autonomous.py
-# ================================================================
-# Semi-Autonomous Mission Controller - ROV Trajectory Replay
-# ================================================================
-#
-# Alur misi semi-autonomous:
-#   1. Operator drive manual Docking -> Target (trajectory direkam)
-#   2. Operator klik "Set Target" -> traj.set_target_snapshot()
-#   3. Operator klik "Start Autonomous" -> start_mission()
-#   4. [REPLAYING]  ROV replay trajectory rekaman menuju target
-#   5. [ALIGNING]   QR Detector aktif, koreksi posisi halus
-#   6. [PICKUP]     Open gripper -> maju -> close gripper
-#   7. [RETURNING]  ROV replay trajectory terbalik ke docking
-#   8. [COMPLETE]   set_mode MANUAL, emit mission_complete
-#
-# Thread model:
-#   - _mission_thread: satu thread background, aktif saat misi
-#   - Control loop berjalan di AUTONOMOUS_LOOP_HZ (default 10Hz)
-#
-# Safety checks setiap loop iteration:
-#   - fs.is_emergency_active -> abort jika True
-#   - mav.is_connected -> abort jika False
-#   - Per-state timeout cegah stuck
-
 import threading
 import time
 import math
@@ -51,58 +28,56 @@ from config import (
     AUTONOMOUS_MAX_LATERAL_CORRECTION,
     AUTONOMOUS_XTE_THRESHOLD_M,
     AUTONOMOUS_LOOP_HZ,
-    AUTONOMOUS_ALIGN_THRESHOLD_PX,
-    AUTONOMOUS_ALIGN_TIMEOUT_S,
-    AUTONOMOUS_KP_ALIGN_LATERAL,
-    AUTONOMOUS_KP_ALIGN_YAW,
-    AUTONOMOUS_MAX_ALIGN_CORRECTION,
-    AUTONOMOUS_PICKUP_ADVANCE_S,
-    AUTONOMOUS_GRIPPER_WAIT_S,
-    AUTONOMOUS_STOP_WAIT_S,
+    FRAME_WIDTH,
+    FRAME_HEIGHT,
+    VISION_SEARCH_YAW_SPEED_PWM,
+    VISION_SEARCH_SWEEP_RANGE,
+    VISION_SEARCH_SETTLE_TIME_S,
+    VISION_SEARCH_TIMEOUT_S,
+    VISION_KP_YAW,
+    VISION_KP_HEAVE,
+    VISION_MAX_YAW_CORRECTION,
+    VISION_MAX_HEAVE_CORRECTION,
+    VISION_ALIGNMENT_X_DEADZONE_PX,
+    VISION_ALIGNMENT_Y_DEADZONE_PX,
+    VISION_ALIGNMENT_TOLERANCE_X_PX,
+    VISION_ALIGNMENT_TOLERANCE_Y_PX,
+    VISION_ALIGNMENT_STABLE_FRAMES,
+    VISION_ALIGN_TIMEOUT_S,
+    VISION_TARGET_LOST_TIMEOUT_S,
+    VISION_APPROACH_SPEED_PWM,
+    VISION_APPROACH_TARGET_SIZE_PX,
+    VISION_APPROACH_TIMEOUT_S,
+    VISION_GRAB_STABILIZE_S,
+    VISION_GRAB_OPEN_WAIT_S,
+    VISION_GRAB_CLOSE_WAIT_S,
+    VISION_VERIFY_BACKOFF_SPEED_PWM,
+    VISION_VERIFY_BACKOFF_DURATION_S,
+    VISION_VERIFY_TIMEOUT_S,
 )
 
 logger = logging.getLogger(__name__)
 
-LOOP_INTERVAL = 1.0 / AUTONOMOUS_LOOP_HZ  # detik per iterasi kontrol
-
-
-# ================================================================
-# State
-# ================================================================
+LOOP_INTERVAL = 1.0 / AUTONOMOUS_LOOP_HZ  # 10Hz
 
 class MissionState:
-    IDLE          = "IDLE"
-    REPLAYING     = "REPLAYING"
-    WALL_APPROACH = "WALL_APPROACH"
-    UNHOOK        = "UNHOOK"
-    SURFACE       = "SURFACE"
-    COMPLETE      = "COMPLETE"
-    ABORTING      = "ABORTING"
-
-
-# ================================================================
-# AutonomousController
-# ================================================================
+    IDLE = "IDLE"
+    NAV_TO_WAYPOINT = "NAV_TO_WAYPOINT"
+    SEARCH = "SEARCH"
+    ALIGN = "ALIGN"
+    APPROACH = "APPROACH"
+    GRAB = "GRAB"
+    VERIFY_GRAB = "VERIFY_GRAB"
+    RETURN = "RETURN"
+    COMPLETE = "COMPLETE"
+    FAILSAFE = "FAILSAFE"
 
 class AutonomousController:
-    """
-    State machine semi-autonomous untuk misi ROV.
-    Satu instance, satu background thread saat aktif.
-    """
-
     def __init__(self, mav, tele, traj, fs,
                  sio_emit: Callable,
                  qr_front_result_queue: Optional[multiprocessing.Queue] = None,
-                 cmd_front_queue: Optional[multiprocessing.Queue] = None):
-        """
-        mav  : MAVLinkBridge
-        tele : TelemetryManager
-        traj : TrajectoryEstimator
-        fs   : FailsafeWatchdog
-        sio_emit        : lambda event, data -> None (SocketIO emit)
-        qr_front_result_queue : queue local untuk menerima hasil QR dari camera_front (disuplai dari ZMQ PUB)
-        cmd_front_queue       : queue local untuk mengirim perintah ke camera_front (diteruskan via ZMQ PUSH)
-        """
+                 cmd_front_queue: Optional[multiprocessing.Queue] = None,
+                 vision_queue: Optional[multiprocessing.Queue] = None):
         self._mav  = mav
         self._tele = tele
         self._traj = traj
@@ -110,6 +85,7 @@ class AutonomousController:
         self._emit = sio_emit
         self._qr_queue    = qr_front_result_queue
         self._cmd_front_q = cmd_front_queue
+        self._vision_queue = vision_queue
 
         self._lock = threading.Lock()
         self._state      = MissionState.IDLE
@@ -118,23 +94,19 @@ class AutonomousController:
         self._abort_reason = ""
         self._mission_thread: Optional[threading.Thread] = None
 
-        # Cache QR result terbaru dari queue (dibaca oleh _read_qr_result)
-        self._latest_qr = None
+        self._latest_vision = None
 
-    # ──────────────────────────────────────────
-    # Public API
-    # ──────────────────────────────────────────
     def start_mission(self, target_id: str) -> dict:
         with self._lock:
             if self._state != MissionState.IDLE:
                 return {"ok": False, "reason": "Misi sedang berjalan"}
             waypoints = self._traj.get_replay_waypoints()
-            if not waypoints:
-                return {"ok": False, "reason": "Tidak ada waypoint. Klik Set Target terlebih dahulu."}
-            self._state     = MissionState.REPLAYING
+            self._state     = MissionState.NAV_TO_WAYPOINT
             self._target_id = target_id
             self._start_time = time.time()
             self._abort_reason = ""
+            self._flush_vision_queue()
+        
         self._mission_thread = threading.Thread(
             target=self._mission_loop,
             args=(waypoints,),
@@ -142,16 +114,16 @@ class AutonomousController:
             name="AutonomousMission",
         )
         self._mission_thread.start()
-        logger.info(f"[Autonomous] Misi dimulai: target='{target_id}' waypoints={len(waypoints)}")
-        self._emit_event("mission_started", f"Misi autonomous dimulai menuju '{target_id}'")
-        return {"ok": True, "waypoints": len(waypoints)}
+        logger.info(f"[Autonomous] Misi dimulai: target='{target_id}'")
+        self._emit_event("mission_started", f"Misi autonomous vision dimulai")
+        return {"ok": True, "waypoints": len(waypoints) if waypoints else 0}
 
     def stop_mission(self, reason: str = "operator_abort"):
         with self._lock:
             if self._state == MissionState.IDLE:
                 return
             self._abort_reason = reason
-            self._state = MissionState.ABORTING
+            self._state = MissionState.FAILSAFE
         logger.info(f"[Autonomous] Misi dihentikan: {reason}")
 
     def get_status(self) -> dict:
@@ -170,254 +142,287 @@ class AutonomousController:
         with self._lock:
             return self._state != MissionState.IDLE
 
-    # ──────────────────────────────────────────
-    # Mission loop (background thread)
-    # ──────────────────────────────────────────
+    # --- Vision Helpers ---
+    def _activate_vision(self):
+        if self._cmd_front_q:
+            try:
+                self._cmd_front_q.put_nowait({"action": "vision_activate"})
+                logger.debug("Vision activated")
+            except:
+                pass
+                
+    def _deactivate_vision(self):
+        if self._cmd_front_q:
+            try:
+                self._cmd_front_q.put_nowait({"action": "vision_deactivate"})
+                logger.debug("Vision deactivated")
+            except:
+                pass
+                
+    def _flush_vision_queue(self):
+        if not self._vision_queue: return
+        while not self._vision_queue.empty():
+            try:
+                self._vision_queue.get_nowait()
+            except:
+                pass
+                
+    def _update_vision(self):
+        if not self._vision_queue: return
+        try:
+            while not self._vision_queue.empty():
+                self._latest_vision = self._vision_queue.get_nowait()
+        except:
+            pass
+            
+    def _get_payload_detection(self):
+        if not self._latest_vision: return None
+        # Age check
+        if time.time() - self._latest_vision.get("timestamp", 0) > 1.0:
+            return None # too old
+        
+        best = None
+        for d in self._latest_vision.get("detections", []):
+            if d["class_name"] == "payload":
+                if best is None or d["confidence"] > best["confidence"]:
+                    best = d
+        return best
+    
+    # --- FSM ---
     def _mission_loop(self, waypoints: list):
-        """
-        Thread utama misi. Jalani semua fase berurutan.
-        Setelah selesai atau abort, kembali ke IDLE.
-        """
         success = False
         try:
-            logger.info(f"[Autonomous] Fase REPLAYING ({len(waypoints)} waypoints)")
-            if not self._phase_replay(waypoints):
-                self._finalize(success=False)
+            if not self._phase_nav_to_waypoint(waypoints):
+                self._finalize(False)
                 return
-
-            self._set_state(MissionState.WALL_APPROACH)
-            logger.info("[Autonomous] Fase WALL_APPROACH (Dead reckoning ke dinding)")
-            if not self._phase_wall_approach():
-                self._finalize(success=False)
-                return
-
-            self._set_state(MissionState.UNHOOK)
-            logger.info("[Autonomous] Fase UNHOOK (Melepas Payload dari Dinding)")
-            self._phase_unhook()
-
-            self._set_state(MissionState.SURFACE)
-            logger.info("[Autonomous] Fase SURFACE (Naik ke permukaan)")
-            self._phase_surface()
-
-            success = True
-
-        except Exception as e:
-            logger.error(f"[Autonomous] Error tak terduga dalam mission_loop: {e}", exc_info=True)
-            self._abort_reason = f"Exception: {e}"
-        finally:
-            self._finalize(success=success)
-
-    # ──────────────────────────────────────────
-    # Phases
-    # ──────────────────────────────────────────
-    def _phase_replay(self, waypoints: list) -> bool:
-        """
-        Replay waypoints dengan kontrol 4 sumbu (Forward, Lateral, Yaw, Depth)
-        serta koreksi Cross-Track Error (XTE) secara proporsional.
-        Return True jika semua waypoint tercapai, False jika abort.
-        """
-        forward_pwm = AUTONOMOUS_REPLAY_SPEED_PWM
-        phase_name  = "REPLAYING"
-
-        # Rekam posisi awal sebagai referensi W_prev untuk waypoint pertama
-        start_pos = self._traj.get_current_pos()
-        start_yaw = self._traj.get_current_yaw()
-        start_wp = {
-            "x": start_pos["x"],
-            "y": start_pos["y"],
-            "depth": start_pos["depth"],
-            "yaw": start_yaw
-        }
-
-        for idx, waypoint in enumerate(waypoints):
-            if not self._is_safe():
-                return False
-
-            wp_start_time = time.time()
-            prev_waypoint = start_wp if idx == 0 else waypoints[idx - 1]
             
-            logger.debug(
-                f"[Autonomous] [{phase_name}] Waypoint {idx+1}/{len(waypoints)}: "
-                f"({waypoint['x']:.2f}, {waypoint['y']:.2f}, depth={waypoint.get('depth', 0.0):.2f})"
-            )
-            self._emit_status(extra={"waypoint_index": idx + 1,
-                                     "waypoint_total": len(waypoints)})
+            self._set_state(MissionState.SEARCH)
+            if not self._phase_search():
+                self._finalize(False)
+                return
+            
+            self._set_state(MissionState.ALIGN)
+            if not self._phase_align():
+                self._finalize(False)
+                return
+            
+            self._set_state(MissionState.APPROACH)
+            if not self._phase_approach():
+                self._finalize(False)
+                return
+            
+            self._set_state(MissionState.GRAB)
+            self._phase_grab()
+            
+            self._set_state(MissionState.VERIFY_GRAB)
+            if not self._phase_verify_grab():
+                self._finalize(False)
+                return
+            
+            self._set_state(MissionState.RETURN)
+            self._phase_return()
+            
+            success = True
+        except Exception as e:
+            logger.error(f"[Autonomous] Exception: {e}", exc_info=True)
+            self._abort_reason = str(e)
+            self._set_state(MissionState.FAILSAFE)
+        finally:
+            self._finalize(success)
 
-            # Loop sampai waypoint tercapai atau timeout
-            while True:
-                if not self._is_safe():
-                    self._send_rc_neutral()
-                    return False
-
-                curr_pos = self._traj.get_current_pos()
-                curr_yaw = self._traj.get_current_yaw()
-
-                # Perhitungan error posisi horizontal
-                dx = waypoint["x"] - curr_pos["x"]
-                dy = waypoint["y"] - curr_pos["y"]
-                dist_2d = math.sqrt(dx * dx + dy * dy)
-
-                # Perhitungan error posisi vertikal (kedalaman)
-                target_depth = waypoint.get("depth", curr_pos["depth"])
-                dz = target_depth - curr_pos["depth"]
-
-                # Cek pencapaian waypoint menggunakan jarak 3D
-                dist_3d = math.sqrt(dx * dx + dy * dy + dz * dz)
-                if dist_3d < AUTONOMOUS_WAYPOINT_REACH_THRESHOLD_M:
-                    logger.debug(f"[Autonomous] [{phase_name}] Waypoint {idx+1} tercapai (dist_3d={dist_3d:.3f}m)")
-                    break
-
-                # Timeout per waypoint
-                if time.time() - wp_start_time > AUTONOMOUS_WAYPOINT_TIMEOUT_S:
-                    logger.warning(f"[Autonomous] [{phase_name}] Waypoint {idx+1} timeout, skip.")
-                    break
-
-                # 1. Kontrol Vertikal (Depth Controller)
-                depth_delta = int(dz * AUTONOMOUS_KP_DEPTH)
-                depth_delta = _clamp(depth_delta, -AUTONOMOUS_MAX_DEPTH_CORRECTION, AUTONOMOUS_MAX_DEPTH_CORRECTION)
-                throttle_pwm = RC_NEUTRAL_PWM - depth_delta
-
-                # 2. Kontrol Rotasi (Yaw Controller)
-                target_heading = math.degrees(math.atan2(dy, dx))
-                yaw_error = self._normalize_angle(target_heading - curr_yaw)
-                yaw_delta = int(_clamp(yaw_error * AUTONOMOUS_KP_YAW,
-                                       -AUTONOMOUS_MAX_YAW_CORRECTION,
-                                        AUTONOMOUS_MAX_YAW_CORRECTION))
-
-                # 3. Kontrol Lateral (Cross-Track Error / XTE)
-                lat_delta = 0
-                ux = waypoint["x"] - prev_waypoint["x"]
-                uy = waypoint["y"] - prev_waypoint["y"]
-                u_mag_sq = ux * ux + uy * uy
-
-                if u_mag_sq > 1e-6:
-                    vx = curr_pos["x"] - prev_waypoint["x"]
-                    vy = curr_pos["y"] - prev_waypoint["y"]
-                    # Proyeksi t pada garis segmen
-                    t = (vx * ux + vy * uy) / u_mag_sq
-                    t = _clamp(t, 0.0, 1.0)
-                    
-                    proj_x = prev_waypoint["x"] + t * ux
-                    proj_y = prev_waypoint["y"] + t * uy
-                    
-                    # Vektor error dari path proyeksi ke posisi ROV
-                    err_x = curr_pos["x"] - proj_x
-                    err_y = curr_pos["y"] - proj_y
-                    
-                    # Rotasikan vektor error global ke body frame ROV untuk dapat lateral error
-                    yaw_rad = math.radians(curr_yaw)
-                    lat_error = -err_x * math.sin(yaw_rad) + err_y * math.cos(yaw_rad)
-                    xte_m = abs(lat_error)
-
-                    if xte_m > AUTONOMOUS_XTE_THRESHOLD_M:
-                        # lat_error > 0 -> ROV berada di kanan jalur -> gerak ke kiri (PWM < 1500)
-                        lat_delta = int(-lat_error * AUTONOMOUS_KP_XTE)
-                        lat_delta = _clamp(lat_delta, -AUTONOMOUS_MAX_LATERAL_CORRECTION, AUTONOMOUS_MAX_LATERAL_CORRECTION)
-
-                # Kirim sinyal kontrol 4 sumbu
-                channels = {
-                    AUTONOMOUS_RC_CH_FORWARD:  forward_pwm,
-                    AUTONOMOUS_RC_CH_YAW:      RC_NEUTRAL_PWM + yaw_delta,
-                    AUTONOMOUS_RC_CH_LATERAL:  RC_NEUTRAL_PWM + lat_delta,
-                    AUTONOMOUS_RC_CH_THROTTLE: throttle_pwm,
-                }
-                self._send_rc(channels)
-                time.sleep(LOOP_INTERVAL)
-
-        self._send_rc_neutral()
-        return True
-
-    def _phase_wall_approach(self) -> bool:
-        """
-        Maju ke dinding menggunakan dead reckoning lambat.
-        (Nantinya akan diganti dengan panduan Object Detection YOLO)
-        """
-        self._emit_event("wall_approach", "Bergerak maju perlahan menuju dinding...")
-        end_time = time.time() + 5.0 # Maju 5 detik
-        while time.time() < end_time:
-            if not self._is_safe():
-                return False
-            self._send_rc({
-                AUTONOMOUS_RC_CH_FORWARD:  AUTONOMOUS_REPLAY_SPEED_PWM,
-                AUTONOMOUS_RC_CH_LATERAL:  RC_NEUTRAL_PWM,
-                AUTONOMOUS_RC_CH_YAW:      RC_NEUTRAL_PWM,
-                AUTONOMOUS_RC_CH_THROTTLE: RC_NEUTRAL_PWM,
-            })
-            time.sleep(LOOP_INTERVAL)
-        self._send_rc_neutral()
-        time.sleep(AUTONOMOUS_STOP_WAIT_S)
-        return True
-
-    def _phase_unhook(self):
-        """Membuka capit, maju menelan payload, tutup capit, lalu mundur."""
-        logger.info("[Autonomous] Unhook: open gripper")
-        self._emit_event("unhook_start", "Membuka capit...")
-        self._mav.gripper("open")
-        time.sleep(AUTONOMOUS_GRIPPER_WAIT_S)
+    def _phase_nav_to_waypoint(self, waypoints) -> bool:
+        self._emit_event("nav", "Navigasi ke area pencarian")
+        if not waypoints: 
+            return True # Langsung search
+            
+        target_wp = waypoints[-1]
+        wp_start_time = time.time()
         
-        self._emit_event("unhook_advance", "Maju perlahan menelan payload...")
-        end_time = time.time() + 2.0
-        while time.time() < end_time:
-            if not self._is_safe():
-                return
-            self._send_rc({
-                AUTONOMOUS_RC_CH_FORWARD:  AUTONOMOUS_REPLAY_SPEED_PWM,
-                AUTONOMOUS_RC_CH_LATERAL:  RC_NEUTRAL_PWM,
-                AUTONOMOUS_RC_CH_YAW:      RC_NEUTRAL_PWM,
-                AUTONOMOUS_RC_CH_THROTTLE: RC_NEUTRAL_PWM,
-            })
-            time.sleep(LOOP_INTERVAL)
-        self._send_rc_neutral()
-        time.sleep(AUTONOMOUS_STOP_WAIT_S)
-
-        logger.info("[Autonomous] Unhook: close gripper")
-        self._emit_event("unhook_close", "Menutup capit, mengamankan payload...")
-        self._mav.gripper("close")
-        time.sleep(AUTONOMOUS_GRIPPER_WAIT_S)
-
-        self._emit_event("unhook_pull", "Mundur perlahan menarik payload lepas dari dinding...")
-        end_time = time.time() + 3.0
-        while time.time() < end_time:
-            if not self._is_safe():
-                return
-            reverse_pwm = RC_NEUTRAL_PWM - (AUTONOMOUS_REPLAY_SPEED_PWM - RC_NEUTRAL_PWM)
-            self._send_rc({
-                AUTONOMOUS_RC_CH_FORWARD:  reverse_pwm,
-                AUTONOMOUS_RC_CH_LATERAL:  RC_NEUTRAL_PWM,
-                AUTONOMOUS_RC_CH_YAW:      RC_NEUTRAL_PWM,
-                AUTONOMOUS_RC_CH_THROTTLE: RC_NEUTRAL_PWM,
-            })
-            time.sleep(LOOP_INTERVAL)
-        self._send_rc_neutral()
-        time.sleep(AUTONOMOUS_STOP_WAIT_S)
-
-    def _phase_surface(self):
-        """Naik ke permukaan air secara perlahan."""
-        self._emit_event("surface_start", "Mengapung ke permukaan...")
-        end_time = time.time() + 5.0 # Naik 5 detik
-        while time.time() < end_time:
-            if not self._is_safe():
+        while True:
+            if not self._is_safe(): return False
+            curr_pos = self._traj.get_current_pos()
+            curr_yaw = self._traj.get_current_yaw()
+            
+            dx = target_wp["x"] - curr_pos["x"]
+            dy = target_wp["y"] - curr_pos["y"]
+            dist_2d = math.sqrt(dx*dx + dy*dy)
+            
+            if dist_2d < AUTONOMOUS_WAYPOINT_REACH_THRESHOLD_M:
                 break
-            # Naik: Throttle PWM > 1500
+            if time.time() - wp_start_time > AUTONOMOUS_WAYPOINT_TIMEOUT_S * len(waypoints):
+                break
+                
+            target_heading = math.degrees(math.atan2(dy, dx))
+            yaw_error = self._normalize_angle(target_heading - curr_yaw)
+            yaw_delta = int(_clamp(yaw_error * AUTONOMOUS_KP_YAW, -AUTONOMOUS_MAX_YAW_CORRECTION, AUTONOMOUS_MAX_YAW_CORRECTION))
+            
             self._send_rc({
-                AUTONOMOUS_RC_CH_FORWARD:  RC_NEUTRAL_PWM,
-                AUTONOMOUS_RC_CH_LATERAL:  RC_NEUTRAL_PWM,
-                AUTONOMOUS_RC_CH_YAW:      RC_NEUTRAL_PWM,
-                AUTONOMOUS_RC_CH_THROTTLE: RC_NEUTRAL_PWM + 200,
+                AUTONOMOUS_RC_CH_FORWARD: AUTONOMOUS_REPLAY_SPEED_PWM,
+                AUTONOMOUS_RC_CH_YAW: RC_NEUTRAL_PWM + yaw_delta
             })
             time.sleep(LOOP_INTERVAL)
+            
+        self._send_rc_neutral()
+        return True
+
+    def _phase_search(self) -> bool:
+        self._activate_vision()
+        self._emit_event("search", "Mencari payload via AI Vision...")
+        start_time = time.time()
+        
+        sweep_dir = 1
+        
+        while time.time() - start_time < VISION_SEARCH_TIMEOUT_S:
+            if not self._is_safe(): return False
+            self._update_vision()
+            target = self._get_payload_detection()
+            if target:
+                self._send_rc_neutral()
+                self._emit_event("search_success", "Payload ditemukan!")
+                return True
+                
+            yaw_pwm = RC_NEUTRAL_PWM + (VISION_SEARCH_YAW_SPEED_PWM * sweep_dir)
+            self._send_rc({AUTONOMOUS_RC_CH_YAW: yaw_pwm})
+            
+            # Switch direction roughly every 3 seconds for basic sweep
+            if int(time.time() - start_time) % 6 > 3:
+                sweep_dir = -1
+            else:
+                sweep_dir = 1
+                
+            time.sleep(LOOP_INTERVAL)
+            
+        self._abort_reason = "Search timeout"
+        return False
+        
+    def _phase_align(self) -> bool:
+        self._emit_event("align", "Menyelaraskan posisi visual")
+        start_time = time.time()
+        stable_count = 0
+        
+        while time.time() - start_time < VISION_ALIGN_TIMEOUT_S:
+            if not self._is_safe(): return False
+            self._update_vision()
+            target = self._get_payload_detection()
+            
+            if not target:
+                self._send_rc_neutral()
+                stable_count = 0
+                time.sleep(LOOP_INTERVAL)
+                continue
+                
+            error_x = target["center"]["x"] - (FRAME_WIDTH / 2)
+            error_y = target["center"]["y"] - (FRAME_HEIGHT / 2)
+            
+            yaw_cmd = 0
+            heave_cmd = 0
+            
+            if abs(error_x) > VISION_ALIGNMENT_X_DEADZONE_PX:
+                yaw_cmd = int(error_x * VISION_KP_YAW)
+                yaw_cmd = _clamp(yaw_cmd, -VISION_MAX_YAW_CORRECTION, VISION_MAX_YAW_CORRECTION)
+                
+            if abs(error_y) > VISION_ALIGNMENT_Y_DEADZONE_PX:
+                # Assuming downward visual error (positive y) means payload is below center -> dive -> decrease throttle
+                heave_cmd = int(-error_y * VISION_KP_HEAVE) 
+                heave_cmd = _clamp(heave_cmd, -VISION_MAX_HEAVE_CORRECTION, VISION_MAX_HEAVE_CORRECTION)
+                
+            self._send_rc({
+                AUTONOMOUS_RC_CH_YAW: RC_NEUTRAL_PWM + yaw_cmd,
+                AUTONOMOUS_RC_CH_THROTTLE: RC_NEUTRAL_PWM + heave_cmd
+            })
+            
+            if abs(error_x) <= VISION_ALIGNMENT_TOLERANCE_X_PX and abs(error_y) <= VISION_ALIGNMENT_TOLERANCE_Y_PX:
+                stable_count += 1
+            else:
+                stable_count = 0
+                
+            if stable_count >= VISION_ALIGNMENT_STABLE_FRAMES:
+                self._send_rc_neutral()
+                self._emit_event("align_success", "Posisi terselaraskan")
+                return True
+                
+            time.sleep(LOOP_INTERVAL)
+            
+        self._abort_reason = "Align timeout"
+        return False
+        
+    def _phase_approach(self) -> bool:
+        self._emit_event("approach", "Mendekati target")
+        start_time = time.time()
+        target_lost_time = None
+        
+        while time.time() - start_time < VISION_APPROACH_TIMEOUT_S:
+            if not self._is_safe(): return False
+            self._update_vision()
+            target = self._get_payload_detection()
+            
+            if not target:
+                if target_lost_time is None:
+                    target_lost_time = time.time()
+                elif time.time() - target_lost_time > VISION_TARGET_LOST_TIMEOUT_S:
+                    self._abort_reason = "Target lost during approach"
+                    return False
+                self._send_rc_neutral()
+                time.sleep(LOOP_INTERVAL)
+                continue
+            
+            target_lost_time = None
+            
+            bbox_width = target["bbox"]["x2"] - target["bbox"]["x1"]
+            if bbox_width >= VISION_APPROACH_TARGET_SIZE_PX:
+                self._send_rc_neutral()
+                self._emit_event("approach_success", "Target tercapai, ukuran bbox terpenuhi")
+                return True
+                
+            error_x = target["center"]["x"] - (FRAME_WIDTH / 2)
+            error_y = target["center"]["y"] - (FRAME_HEIGHT / 2)
+            yaw_cmd = int(_clamp(error_x * VISION_KP_YAW, -VISION_MAX_YAW_CORRECTION, VISION_MAX_YAW_CORRECTION))
+            heave_cmd = int(_clamp(-error_y * VISION_KP_HEAVE, -VISION_MAX_HEAVE_CORRECTION, VISION_MAX_HEAVE_CORRECTION))
+            
+            self._send_rc({
+                AUTONOMOUS_RC_CH_FORWARD: RC_NEUTRAL_PWM + VISION_APPROACH_SPEED_PWM,
+                AUTONOMOUS_RC_CH_YAW: RC_NEUTRAL_PWM + yaw_cmd,
+                AUTONOMOUS_RC_CH_THROTTLE: RC_NEUTRAL_PWM + heave_cmd
+            })
+            time.sleep(LOOP_INTERVAL)
+            
+        self._abort_reason = "Approach timeout"
+        return False
+
+    def _phase_grab(self):
+        self._emit_event("grab", "Menstabilkan dan Grab payload")
+        self._send_rc_neutral()
+        time.sleep(VISION_GRAB_STABILIZE_S)
+        
+        self._mav.gripper("open")
+        time.sleep(VISION_GRAB_OPEN_WAIT_S)
+        
+        self._send_rc({AUTONOMOUS_RC_CH_FORWARD: RC_NEUTRAL_PWM + int(VISION_APPROACH_SPEED_PWM*0.5)})
+        time.sleep(0.5)
+        self._send_rc_neutral()
+        
+        self._mav.gripper("close")
+        time.sleep(VISION_GRAB_CLOSE_WAIT_S)
+
+    def _phase_verify_grab(self) -> bool:
+        self._emit_event("verify", "Memverifikasi pengambilan payload")
+        self._send_rc({AUTONOMOUS_RC_CH_FORWARD: RC_NEUTRAL_PWM + VISION_VERIFY_BACKOFF_SPEED_PWM})
+        time.sleep(VISION_VERIFY_BACKOFF_DURATION_S)
+        self._send_rc_neutral()
+        return True
+        
+    def _phase_return(self):
+        self._emit_event("return", "Kembali ke permukaan")
+        self._send_rc({AUTONOMOUS_RC_CH_THROTTLE: RC_NEUTRAL_PWM + 200})
+        time.sleep(3.0)
         self._send_rc_neutral()
 
-    # ──────────────────────────────────────────
-    # Safety & finalize
-    # ──────────────────────────────────────────
     def _is_safe(self) -> bool:
-        """Return False jika ada kondisi darurat yang memerlukan abort."""
         if not self._mav.is_connected:
             self._abort_reason = "MAVLink terputus"
             return False
         with self._lock:
-            if self._state == MissionState.ABORTING:
+            if self._state == MissionState.ABORTING or self._state == MissionState.FAILSAFE:
                 return False
         if hasattr(self._fs, "is_emergency_active") and self._fs.is_emergency_active:
             self._abort_reason = "Emergency stop aktif"
@@ -425,56 +430,30 @@ class AutonomousController:
         return True
 
     def _finalize(self, success: bool):
-        """Bersihkan state setelah misi selesai atau abort."""
         self._send_rc_neutral()
-        self._deactivate_qr_detector()
+        self._deactivate_vision()
         self._mav.set_mode("MANUAL")
-
         duration = round(time.time() - self._start_time, 1) if self._start_time else 0.0
-
         with self._lock:
             self._state = MissionState.IDLE
-
         if success:
-            logger.info(f"[Autonomous] Misi SELESAI: target='{self._target_id}' durasi={duration}s")
-            self._emit("mission_complete", {
-                "success":   True,
-                "target_id": self._target_id,
-                "duration_s": duration,
-                "reason":    "success",
-                "timestamp": datetime.utcnow().isoformat(),
-            })
+            logger.info(f"[Autonomous] Misi SELESAI")
+            self._emit("mission_complete", {"success": True, "reason": "success", "duration_s": duration})
         else:
-            reason = self._abort_reason or "unknown"
-            logger.warning(f"[Autonomous] Misi ABORT: {reason} durasi={duration}s")
-            self._emit("mission_complete", {
-                "success":   False,
-                "target_id": self._target_id,
-                "duration_s": duration,
-                "reason":    reason,
-                "timestamp": datetime.utcnow().isoformat(),
-            })
+            logger.warning(f"[Autonomous] Misi ABORT: {self._abort_reason}")
+            self._emit("mission_complete", {"success": False, "reason": self._abort_reason, "duration_s": duration})
 
-    # ──────────────────────────────────────────
-    # RC helpers
-    # ──────────────────────────────────────────
     def _send_rc(self, channels: dict):
-        """
-        Kirim manual control ke MAVLink dan update trajectory velocity
-        agar dead reckoning tetap akurat selama autonomous.
-        """
         ch_lat = channels.get(AUTONOMOUS_RC_CH_LATERAL, RC_NEUTRAL_PWM)
         ch_fwd = channels.get(AUTONOMOUS_RC_CH_FORWARD, RC_NEUTRAL_PWM)
         ch_thr = channels.get(AUTONOMOUS_RC_CH_THROTTLE, RC_NEUTRAL_PWM)
         ch_yaw = channels.get(AUTONOMOUS_RC_CH_YAW, RC_NEUTRAL_PWM)
 
-        # Convert to MANUAL_CONTROL ranges (-1000 to 1000, throttle 0 to 1000)
         y = int((ch_lat - RC_NEUTRAL_PWM) * 2.5)
         x = int((ch_fwd - RC_NEUTRAL_PWM) * 2.5)
         z = int(500 + (ch_thr - RC_NEUTRAL_PWM) * 1.25)
         r = int((ch_yaw - RC_NEUTRAL_PWM) * 2.5)
 
-        # Clamp values
         x = max(-1000, min(1000, x))
         y = max(-1000, min(1000, y))
         z = max(0, min(1000, z))
@@ -487,54 +466,8 @@ class AutonomousController:
         self._traj.update_velocity(vel_x, vel_y)
 
     def _send_rc_neutral(self):
-        """Kirim semua channel ke posisi netral (stop semua motor)."""
-        channels = {
-            AUTONOMOUS_RC_CH_FORWARD:  RC_NEUTRAL_PWM,
-            AUTONOMOUS_RC_CH_LATERAL:  RC_NEUTRAL_PWM,
-            AUTONOMOUS_RC_CH_YAW:      RC_NEUTRAL_PWM,
-            AUTONOMOUS_RC_CH_THROTTLE: RC_NEUTRAL_PWM,
-        }
-        self._send_rc(channels)
+        self._send_rc({})
 
-    # ──────────────────────────────────────────
-    # QR detector helpers
-    # ──────────────────────────────────────────
-    def _activate_qr_detector(self):
-        if self._cmd_front_q is not None:
-            try:
-                self._cmd_front_q.put_nowait({"action": "qr_activate"})
-                logger.debug("[Autonomous] Perintah qr_activate dikirim ke CameraFront")
-            except Exception:
-                pass
-
-    def _deactivate_qr_detector(self):
-        if self._cmd_front_q is not None:
-            try:
-                self._cmd_front_q.put_nowait({"action": "qr_deactivate"})
-                logger.debug("[Autonomous] Perintah qr_deactivate dikirim ke CameraFront")
-            except Exception:
-                pass
-
-    def _flush_qr_queue(self):
-        if self._qr_queue is None:
-            return
-        while True:
-            try:
-                self._qr_queue.get_nowait()
-            except Exception:
-                break
-
-    def _read_qr_result(self) -> Optional[dict]:
-        if self._qr_queue is None:
-            return None
-        try:
-            return self._qr_queue.get_nowait()
-        except Exception:
-            return None
-
-    # ──────────────────────────────────────────
-    # Emit helpers
-    # ──────────────────────────────────────────
     def _set_state(self, new_state: str):
         with self._lock:
             self._state = new_state
@@ -543,15 +476,13 @@ class AutonomousController:
 
     def _emit_status(self, extra: Optional[dict] = None):
         with self._lock:
-            elapsed = round(time.time() - self._start_time, 1)
             payload = {
                 "state":     self._state,
                 "target_id": self._target_id,
-                "elapsed_s": elapsed,
+                "elapsed_s": round(time.time() - self._start_time, 1),
                 "is_active": self._state != MissionState.IDLE,
             }
-        if extra:
-            payload.update(extra)
+        if extra: payload.update(extra)
         self._emit("autonomous_status", payload)
 
     def _emit_event(self, event_type: str, message: str):
@@ -561,15 +492,11 @@ class AutonomousController:
             "timestamp": datetime.utcnow().isoformat(),
         })
 
-    # ──────────────────────────────────────────
-    # Utility
-    # ──────────────────────────────────────────
     @staticmethod
     def _normalize_angle(angle: float) -> float:
         while angle >  180: angle -= 360
         while angle < -180: angle += 360
         return angle
-
 
 def _clamp(val, lo, hi):
     return max(lo, min(hi, val))

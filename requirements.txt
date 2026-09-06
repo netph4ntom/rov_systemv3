@@ -30,3 +30,6 @@ aiortc>=1.6.0               # WebRTC streaming
 
 # ── Failsafe & Watchdog ─────────────────────────────────────
 psutil>=5.9.0
+
+# ── Autonomous Vision ───────────────────────────────────────
+ultralytics>=8.0.0          # YOLO object detection

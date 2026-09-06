@@ -26,6 +26,7 @@ from camera_front.image_processing import FrontImageProcessor
 from camera_front.record import FrontRecorder
 from camera_front.screenshot import FrontScreenshot
 from camera_front.qr_detector import QRDetector
+from camera_front.detector import YOLODetector
 from typing import Optional, Any
 from config import (
     PORT_STREAM_FRONT,
@@ -33,6 +34,7 @@ from config import (
     FRAME_FPS,
     ZMQ_PORT_FRONT_PUB,
     ZMQ_PORT_FRONT_CMD,
+    VISION_MODEL_PATH,
 )
 
 logger = logging.getLogger(__name__)
@@ -153,6 +155,8 @@ _processor: Optional[FrontImageProcessor] = None
 _recorder: Optional[FrontRecorder] = None
 _screenshotter: Optional[FrontScreenshot] = None
 _qr_detector: Optional[QRDetector] = None
+_yolo_detector: Optional[YOLODetector] = None
+_vision_active: bool = False
 
 # ZMQ socket references
 _zmq_ctx: Optional[zmq.Context] = None
@@ -161,6 +165,7 @@ _zmq_pull_cmd: Optional[zmq.Socket] = None
 
 # Wrapper for sending command results via ZMQ
 _result_queue: Optional[ZmqQueueWrapper] = None
+_vision_result_queue: Optional[ZmqQueueWrapper] = None
 
 _raw_frame = None
 _display_frame = None
@@ -185,6 +190,19 @@ def _capture_loop():
 
         # Frame dengan HUD untuk stream
         display = _processor.process(frame)
+
+        # YOLO detection (hanya saat vision active untuk autonomous)
+        if _vision_active and _yolo_detector is not None:
+            detections = _yolo_detector.detect(frame)
+            if _vision_result_queue is not None:
+                _vision_result_queue.put_nowait({
+                    "detections": [d.to_dict() for d in detections],
+                    "timestamp": time.time()
+                })
+            # Gambar bounding box pada stream
+            for d in detections:
+                cv2.rectangle(display, (d.bbox["x1"], d.bbox["y1"]), (d.bbox["x2"], d.bbox["y2"]), (0, 255, 0), 2)
+                cv2.putText(display, f"{d.class_name} {d.confidence:.2f}", (d.bbox["x1"], d.bbox["y1"]-5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
 
         # QR overlay (hanya saat detektor aktif untuk autonomous alignment)
         if _qr_detector is not None and _qr_detector.is_active:
@@ -233,6 +251,15 @@ def _zmq_command_loop():
             elif action == "qr_deactivate":
                 if _qr_detector is not None:
                     _qr_detector.deactivate()
+
+            elif action == "vision_activate":
+                global _vision_active
+                _vision_active = True
+                logger.info("[FrontStream] Vision detector diaktifkan via ZMQ.")
+
+            elif action == "vision_deactivate":
+                _vision_active = False
+                logger.info("[FrontStream] Vision detector dinonaktifkan via ZMQ.")
 
             else:
                 logger.warning(f"[FrontStream] Unknown command: {action}")
@@ -308,8 +335,8 @@ async def health():
 
 
 def run_front_stream_server():
-    global _camera, _processor, _recorder, _screenshotter, _qr_detector
-    global _zmq_ctx, _zmq_pub, _zmq_pull_cmd, _result_queue
+    global _camera, _processor, _recorder, _screenshotter, _qr_detector, _yolo_detector
+    global _zmq_ctx, _zmq_pub, _zmq_pull_cmd, _result_queue, _vision_result_queue
 
     logging.basicConfig(level=logging.INFO)
     logger.info("[FrontStream] Proses dimulai")
@@ -330,12 +357,15 @@ def run_front_stream_server():
     # Buat queue wrappers yang meneruskan pesan ke ZMQ PUB
     qr_front_result_zmq = ZmqQueueWrapper(_zmq_pub, "qr_front_result")
     _result_queue = ZmqQueueWrapper(_zmq_pub, "camera_result")
+    _vision_result_queue = ZmqQueueWrapper(_zmq_pub, "vision_front_result")
 
     _camera = FrontCamera()
     _processor = FrontImageProcessor(show_hud=True)
     _recorder = FrontRecorder()
     _screenshotter = FrontScreenshot()
     _qr_detector = QRDetector(result_queue=qr_front_result_zmq)
+    _yolo_detector = YOLODetector()
+    _yolo_detector.load_model(VISION_MODEL_PATH)
 
     # Start capture thread
     threading.Thread(

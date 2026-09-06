@@ -105,8 +105,9 @@ ZMQ_PORT_FRONT_CMD  = 5558  # Core pushes commands to front camera
 SERVO_GRIPPER_CHANNEL   = 9          # AUX channel untuk servo gripper
 SERVO_GRIPPER_OPEN_PWM  = 1900       # PWM saat gripper terbuka
 SERVO_GRIPPER_CLOSE_PWM = 1100       # PWM saat gripper tertutup
-
-RELAY_LIGHT_INDEX = 0                # relay index untuk lampu utama
+SERVO_LIGHT_CHANNEL = 10             # AUX channel untuk servo lampu
+SERVO_LIGHT_ON_PWM = 1900            # PWM saat lampu menyala penuh
+SERVO_LIGHT_OFF_PWM = 1100           # PWM saat lampu mati
 
 # ──────────────────────────────────────────────
 # Joystick
@@ -190,3 +191,45 @@ AUTONOMOUS_STOP_WAIT_S               = 0.5   # detik tunggu motor berhenti sebel
 # Thinning waypoints untuk mengurangi overshoot di trajektori rekaman
 # Ambil 1 dari N waypoint (subsample) — 1 = gunakan semua
 AUTONOMOUS_WAYPOINT_SUBSAMPLE         = 3     # ambil setiap waypoint ke-3
+
+# ================================================================
+# VISION AUTONOMOUS CONFIGURATION (YOLO)
+# ================================================================
+
+# Detector Configuration
+VISION_MODEL_PATH = "models/rov_best.pt"
+VISION_CONFIDENCE_THRESHOLD = 0.50
+VISION_DETECTION_MAX_AGE_MS = 1000  # ms max age for detection to be considered valid
+VISION_TARGET_ACQUISITION_FRAMES = 3 # consecutive detections required to lock on
+
+# Search Phase (Yaw sweep)
+VISION_SEARCH_YAW_SPEED_PWM = 100   # PWM delta for yaw sweep
+VISION_SEARCH_SWEEP_RANGE = 45      # degrees to sweep left/right
+VISION_SEARCH_SETTLE_TIME_S = 1.0   # wait time at the end of sweep
+VISION_SEARCH_TIMEOUT_S = 60.0      # abort if target not found in 60s
+
+# Alignment Phase (P-Controller)
+VISION_KP_YAW = 0.5                 # Gain for horizontal error -> Yaw
+VISION_KP_HEAVE = 0.5               # Gain for vertical error -> Heave
+VISION_MAX_YAW_CORRECTION = 150
+VISION_MAX_HEAVE_CORRECTION = 150
+VISION_ALIGNMENT_X_DEADZONE_PX = 20
+VISION_ALIGNMENT_Y_DEADZONE_PX = 20
+VISION_ALIGNMENT_TOLERANCE_X_PX = 40
+VISION_ALIGNMENT_TOLERANCE_Y_PX = 40
+VISION_ALIGNMENT_STABLE_FRAMES = 5
+VISION_ALIGN_TIMEOUT_S = 30.0
+VISION_TARGET_LOST_TIMEOUT_S = 3.0
+
+# Approach Phase
+VISION_APPROACH_SPEED_PWM = 100
+VISION_APPROACH_TARGET_SIZE_PX = 250 # Stop when payload bbox width reaches this size
+VISION_APPROACH_TIMEOUT_S = 20.0
+
+# Grab & Verify Phase
+VISION_GRAB_STABILIZE_S = 1.0
+VISION_GRAB_OPEN_WAIT_S = 1.0
+VISION_GRAB_CLOSE_WAIT_S = 1.0
+VISION_VERIFY_BACKOFF_SPEED_PWM = -100
+VISION_VERIFY_BACKOFF_DURATION_S = 2.0
+VISION_VERIFY_TIMEOUT_S = 5.0
