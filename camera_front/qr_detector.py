@@ -40,6 +40,7 @@ class QRResult:
     data:      str
     offset_x:  float
     offset_y:  float
+    width:     float
     aligned:   bool
     timestamp: float
 
@@ -52,6 +53,9 @@ class QRDetector:
         self._result_queue = result_queue
         self._last_send_time = 0.0
         self._SEND_INTERVAL  = 0.1
+        self._last_scan_time = 0.0
+        self._SCAN_INTERVAL  = 0.25
+        self._last_pts = None
         if not _PYZBAR_OK:
             logger.warning("[QRDetector-Front] pyzbar tidak dapat diimport.")
 
@@ -121,30 +125,42 @@ class QRDetector:
         qr_data = None
         pts = None
 
-        # 1. Coba WeChat QR Detector jika tersedia
-        if self.wechat_detector is not None:
-            try:
-                res, points = self.wechat_detector.detectAndDecode(frame)
-                if res and len(res) > 0 and len(points) > 0:
-                    qr_data = res[0]
-                    pts = np.array(points[0], dtype=np.int32)  # shape (4, 2)
-            except Exception as e:
-                logger.error(f"[QRDetector-Front] WeChat decode error: {e}")
+        now = time.time()
+        if now - self._last_scan_time >= self._SCAN_INTERVAL:
+            self._last_scan_time = now
+            # 1. Coba WeChat QR Detector jika tersedia
+            if self.wechat_detector is not None:
+                try:
+                    res, points = self.wechat_detector.detectAndDecode(frame)
+                    if res and len(res) > 0 and len(points) > 0:
+                        qr_data = res[0]
+                        pts = np.array(points[0], dtype=np.int32)  # shape (4, 2)
+                except Exception as e:
+                    logger.error(f"[QRDetector-Front] WeChat decode error: {e}")
 
-        # 2. Fallback ke pyzbar jika WeChat gagal atau tidak tersedia
-        if qr_data is None and _PYZBAR_OK:
-            try:
-                decoded = pyzbar.decode(frame)
-                if decoded:
-                    qr = max(decoded, key=lambda q: q.rect.width * q.rect.height)
-                    qr_data = qr.data.decode("utf-8", errors="replace")
-                    rect = qr.rect
-                    pts = np.array([[rect.left, rect.top],
-                                    [rect.left + rect.width, rect.top],
-                                    [rect.left + rect.width, rect.top + rect.height],
-                                    [rect.left, rect.top + rect.height]], dtype=np.int32)
-            except Exception as e:
-                logger.error(f"[QRDetector-Front] pyzbar decode error: {e}")
+            # 2. Fallback ke pyzbar jika WeChat gagal atau tidak tersedia
+            if qr_data is None and _PYZBAR_OK:
+                try:
+                    decoded = pyzbar.decode(frame)
+                    if decoded:
+                        qr = max(decoded, key=lambda q: q.rect.width * q.rect.height)
+                        qr_data = qr.data.decode("utf-8", errors="replace")
+                        rect = qr.rect
+                        pts = np.array([[rect.left, rect.top],
+                                        [rect.left + rect.width, rect.top],
+                                        [rect.left + rect.width, rect.top + rect.height],
+                                        [rect.left, rect.top + rect.height]], dtype=np.int32)
+                except Exception as e:
+                    logger.error(f"[QRDetector-Front] pyzbar decode error: {e}")
+            
+            with self._lock:
+                self._last_pts = pts
+        else:
+            # Gunakan hasil scan terakhir yang di-cache
+            with self._lock:
+                if self._latest_result is not None:
+                    qr_data = self._latest_result.data
+                    pts = self._last_pts
 
         if qr_data is None or pts is None:
             cv2.putText(frame, "SEARCHING QR...", (8, h - 10),
@@ -156,13 +172,14 @@ class QRDetector:
         # Hitung center dari pts
         qr_cx = int(np.mean(pts[:, 0]))
         qr_cy = int(np.mean(pts[:, 1]))
+        qr_w = float(np.max(pts[:, 0]) - np.min(pts[:, 0]))
         offset_x = float(qr_cx - cx)
         offset_y = float(qr_cy - cy)
         aligned = (abs(offset_x) < AUTONOMOUS_ALIGN_THRESHOLD_PX and
                    abs(offset_y) < AUTONOMOUS_ALIGN_THRESHOLD_PX)
 
         result = QRResult(data=qr_data, offset_x=offset_x, offset_y=offset_y,
-                          aligned=aligned, timestamp=time.time())
+                          width=qr_w, aligned=aligned, timestamp=time.time())
         with self._lock:
             self._latest_result = result
         self._try_send_to_queue(result)

@@ -35,6 +35,7 @@ from core.telemetry import TelemetryManager
 from core.trajectory import TrajectoryEstimator
 from core.failsafe import FailsafeWatchdog
 from core.autonomous import AutonomousController
+from core.config_manager import load_config, save_config
 from config import (
     PORT_CORE_API,
     PORT_STREAM_FRONT,
@@ -111,6 +112,9 @@ def _drain_autonomous_cmd_queue():
 
 
 def _store_qr_from_queue(data: dict):
+    if not isinstance(data, dict):
+        logger.warning(f"[Routes] QR data bukan dictionary: {data}")
+        return
     _qr_history.append({**data, "received_at": datetime.utcnow().isoformat()})
     if len(_qr_history) > QR_HISTORY_MAX:
         _qr_history.pop(0)
@@ -197,14 +201,14 @@ def create_app(
     # Register handlers
     def _on_qr_front_result(payload):
         # Forward to autonomous controller queue
-        if autonomous and hasattr(autonomous, "_qr_queue") and autonomous._qr_queue is not None:
+        if autonomous and autonomous.is_active and hasattr(autonomous, "_qr_queue") and autonomous._qr_queue is not None:
             try:
                 autonomous._qr_queue.put_nowait(payload)
             except Exception:
                 pass
 
     def _on_vision_front_result(payload):
-        if autonomous and hasattr(autonomous, "_vision_queue") and autonomous._vision_queue is not None:
+        if autonomous and autonomous.is_active and hasattr(autonomous, "_vision_queue") and autonomous._vision_queue is not None:
             try:
                 autonomous._vision_queue.put_nowait(payload)
             except Exception:
@@ -217,7 +221,25 @@ def create_app(
     )
 
     # ── FastAPI REST Endpoints ─────────────────
+    @fastapi_app.get("/api/config")
+    async def get_config():
+        return load_config()
+
+    @fastapi_app.post("/api/config")
+    async def update_config(request: Request):
+        try:
+            data = await request.json()
+            if save_config(data):
+                if _loop is not None:
+                    asyncio.run_coroutine_threadsafe(sio.emit("config_update", data), _loop)
+                return {"status": "ok"}
+            return JSONResponse(status_code=500, content={"error": "Failed to save config"})
+        except Exception as e:
+            logger.error(f"[Config] Error: {e}")
+            return JSONResponse(status_code=400, content={"error": str(e)})
+
     @fastapi_app.get("/api/status")
+
     async def status():
         return {
             "service": "ROV Core API",
@@ -281,6 +303,35 @@ def create_app(
             return JSONResponse(status_code=400, content={"error": "camera harus 'front' atau 'bottom'"})
         ok, msg = _send_camera_cmd(cam, "record_start")
         return {"camera": cam, "action": "record_start", "queued": ok, "message": msg}
+
+
+    @fastapi_app.post("/api/camera/{cam}/vision/activate")
+    async def camera_vision_activate(cam: str):
+        if cam not in ("front", "bottom"):
+            return JSONResponse(status_code=400, content={"error": "camera harus 'front' atau 'bottom'"})
+        ok, msg = _send_camera_cmd(cam, "vision_activate")
+        return {"camera": cam, "action": "vision_activate", "queued": ok, "message": msg}
+
+    @fastapi_app.post("/api/camera/{cam}/vision/deactivate")
+    async def camera_vision_deactivate(cam: str):
+        if cam not in ("front", "bottom"):
+            return JSONResponse(status_code=400, content={"error": "camera harus 'front' atau 'bottom'"})
+        ok, msg = _send_camera_cmd(cam, "vision_deactivate")
+        return {"camera": cam, "action": "vision_deactivate", "queued": ok, "message": msg}
+
+    @fastapi_app.post("/api/camera/{cam}/qr/activate")
+    async def camera_qr_activate(cam: str):
+        if cam not in ("front", "bottom"):
+            return JSONResponse(status_code=400, content={"error": "camera harus 'front' atau 'bottom'"})
+        ok, msg = _send_camera_cmd(cam, "qr_activate")
+        return {"camera": cam, "action": "qr_activate", "queued": ok, "message": msg}
+
+    @fastapi_app.post("/api/camera/{cam}/qr/deactivate")
+    async def camera_qr_deactivate(cam: str):
+        if cam not in ("front", "bottom"):
+            return JSONResponse(status_code=400, content={"error": "camera harus 'front' atau 'bottom'"})
+        ok, msg = _send_camera_cmd(cam, "qr_deactivate")
+        return {"camera": cam, "action": "qr_deactivate", "queued": ok, "message": msg}
 
     @fastapi_app.post("/api/camera/{cam}/record/stop")
     async def camera_record_stop(cam: str):
@@ -358,6 +409,12 @@ def create_app(
 
     @sio.on("cmd_rc_override")
     async def on_rc_override(sid, data: dict):
+        # Control Multiplexer: Tolak jika Emergency Stop atau Autonomous sedang aktif
+        if _fs and hasattr(_fs, "_emergency_active") and _fs._emergency_active:
+            return
+        if _autonomous and _autonomous.is_active:
+            return
+
         global _last_rc_override_time
         # BUG-6 Fix: Rate limiting — buang perintah berlebih (maks ~33Hz)
         # Mencegah banjir MAVLink jika ada duplikat interval atau multiple clients
@@ -370,10 +427,10 @@ def create_app(
         frontend_channels = {int(k): int(v) for k, v in data.get("channels", {}).items()}
         logger.debug(f"[Routes] cmd_rc_override (frontend): {frontend_channels}")
         
-        # Map frontend channel keys (1=Lateral, 2=Forward, 3=Throttle, 4=Yaw)
+        # Map frontend channel keys (CH6=Lateral, CH5=Forward, CH3=Throttle, CH4=Yaw) sesuai ArduSub
         # and scale to MANUAL_CONTROL ranges (Surge/Sway/Yaw: -1000 to 1000, Throttle: 0 to 1000)
-        ch_lat = frontend_channels.get(1, RC_NEUTRAL_PWM)
-        ch_fwd = frontend_channels.get(2, RC_NEUTRAL_PWM)
+        ch_lat = frontend_channels.get(6, RC_NEUTRAL_PWM)
+        ch_fwd = frontend_channels.get(5, RC_NEUTRAL_PWM)
         ch_thr = frontend_channels.get(3, RC_NEUTRAL_PWM)
         ch_yaw = frontend_channels.get(4, RC_NEUTRAL_PWM)
 
@@ -391,11 +448,11 @@ def create_app(
         if _mav:
             _mav.manual_control(x, y, z, r)
         if _traj:
-            ch1 = frontend_channels.get(1, RC_NEUTRAL_PWM)
-            ch2 = frontend_channels.get(2, RC_NEUTRAL_PWM)
+            ch_lat_val = frontend_channels.get(6, RC_NEUTRAL_PWM)
+            ch_fwd_val = frontend_channels.get(5, RC_NEUTRAL_PWM)
             _traj.update_velocity(
-                ((ch1 - RC_NEUTRAL_PWM) / 500.0) * JOYSTICK_SCALE_MS,
-                ((ch2 - RC_NEUTRAL_PWM) / 500.0) * JOYSTICK_SCALE_MS,
+                ((ch_lat_val - RC_NEUTRAL_PWM) / 500.0) * JOYSTICK_SCALE_MS,
+                ((ch_fwd_val - RC_NEUTRAL_PWM) / 500.0) * JOYSTICK_SCALE_MS,
             )
 
     @sio.on("cmd_emergency_stop")
@@ -408,6 +465,15 @@ def create_app(
     async def on_clear_emergency(sid, data=None):
         if _fs:
             _fs.clear_emergency()
+
+    @sio.on("cmd_set_target")
+    async def on_set_target(sid, data=None):
+        target_id = (data or {}).get("target_id", "UNKNOWN")
+        if not _traj:
+            await sio.emit("mission_complete", {"success": False, "reason": "Trajectory tidak diinisialisasi"}, to=sid)
+            return
+        count = _traj.set_target_snapshot(target_id)
+        logger.info(f"[Routes] cmd_set_target target='{target_id}' waypoints={count}")
 
     @sio.on("cmd_autonomous_start")
     async def on_autonomous_start(sid, data=None):

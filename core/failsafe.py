@@ -107,6 +107,7 @@ class FailsafeWatchdog:
         self._lock   = threading.RLock()
         self._running = False
         self._thread: threading.Thread | None = None
+        self._is_reconnecting = False
 
         # Emergency state
         self._emergency_active = False
@@ -243,6 +244,10 @@ class FailsafeWatchdog:
     def _check_mavlink(self):
         if not self._mav:
             return
+            
+        with self._lock:
+            if self._is_reconnecting:
+                return
 
         now         = time.time()
         connected   = self._mav.is_connected
@@ -448,6 +453,8 @@ class FailsafeWatchdog:
 
     def _do_reconnect_mavlink(self):
         """Jalankan di background thread: disconnect -> wait -> connect."""
+        with self._lock:
+            self._is_reconnecting = True
         logger.info("[Failsafe] Mencoba reconnect MAVLink...")
         try:
             if self._mav:
@@ -462,6 +469,9 @@ class FailsafeWatchdog:
                     logger.error("[Failsafe] MAVLink reconnect gagal")
         except Exception as e:
             logger.error(f"[Failsafe] Reconnect error: {e}")
+        finally:
+            with self._lock:
+                self._is_reconnecting = False
 
     def _execute_critical(self, reason: str):
         """

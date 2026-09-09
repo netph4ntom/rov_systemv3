@@ -51,6 +51,7 @@ class QRDetector:
         self._last_qr_data:   str | None   = None
         self._dock_aligned:   bool         = False
         self._last_bbox:      np.ndarray | None = None
+        self.is_active:       bool         = False
 
         self._scan_interval = QR_SCAN_INTERVAL_MS / 1000.0
 
@@ -87,6 +88,17 @@ class QRDetector:
         except Exception as e:
             logger.error(f"[QRDetector] Gagal inisialisasi WeChat QR: {e}. Menggunakan pyzbar.")
 
+    def activate(self):
+        self.is_active = True
+        logger.info("[QRDetector] Bottom QR Detector diaktifkan")
+
+    def deactivate(self):
+        self.is_active = False
+        self._last_qr_data = None
+        self._dock_aligned = False
+        self._last_bbox = None
+        logger.info("[QRDetector] Bottom QR Detector dinonaktifkan")
+
     # ──────────────────────────────────────────
     # Main method — dipanggil tiap frame
     # ──────────────────────────────────────────
@@ -118,36 +130,18 @@ class QRDetector:
         else:
             preprocessed = processor  # Fallback jika gambar preprocessed dilewatkan langsung (legacy/test)
 
-        # ====================================================
-        # ROI Crop (menghemat CPU)
-        # ====================================================
-        h, w = preprocessed.shape[:2]
-        roi_w, roi_h = 320, 320  # Memotong area tengah 320x320 piksel
-        
-        if w >= roi_w and h >= roi_h:
-            x_offset = (w - roi_w) // 2
-            y_offset = (h - roi_h) // 2
-            roi_img = preprocessed[y_offset:y_offset+roi_h, x_offset:x_offset+roi_w]
-        else:
-            roi_img = preprocessed
-            x_offset = y_offset = 0
-
         qr_data = None
         bbox = None
 
         # 1. Coba WeChat QR Detector jika tersedia (gunakan grayscale preprocessed untuk kecepatan CNN)
         if self.wechat_detector is not None:
-            qr_data, bbox = self._decode_wechat(roi_img)
+            qr_data, bbox = self._decode_wechat(preprocessed)
 
         # 2. Fallback ke pyzbar jika WeChat gagal atau tidak tersedia
         if qr_data is None and _PYZBAR_OK:
-            qr_data, bbox_raw = self._decode_pyzbar(roi_img)
+            qr_data, bbox_raw = self._decode_pyzbar(preprocessed)
             if bbox_raw is not None:
                 bbox = self._rect_to_ndarray(bbox_raw)
-
-        # 3. Sesuaikan kembali koordinat BBOX ke skala layar penuh
-        if bbox is not None:
-            bbox = bbox + np.array([[[x_offset, y_offset]]])
 
         # Snapshot state lama sebelum diupdate
         prev_qr_data = self._last_qr_data

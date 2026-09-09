@@ -105,9 +105,16 @@ class TrajectoryEstimator:
             # Velocity di-set dari joystick (update_velocity dipanggil dari routes)
             yaw_rad = math.radians(self._yaw)
 
+            # Ambil status armed dari telemetry (default False jika tidak ada)
+            is_armed = telemetry.get("armed", False)
+
             # Thruster forward/lateral dirotasikan sesuai heading ROV
-            forward = self._vel_y  # maju/mundur
-            lateral = self._vel_x  # kanan/kiri
+            if not is_armed:
+                forward = 0.0
+                lateral = 0.0
+            else:
+                forward = self._vel_y  # maju/mundur
+                lateral = self._vel_x  # kanan/kiri
 
             dx = (forward * math.cos(yaw_rad) - lateral * math.sin(yaw_rad)) * dt
             dy = (forward * math.sin(yaw_rad) + lateral * math.cos(yaw_rad)) * dt

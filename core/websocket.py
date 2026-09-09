@@ -77,7 +77,12 @@ async def _zmq_listener_loop(bottom_pub_port: int, front_pub_port: int):
                 try:
                     payload = json.loads(payload_str)
                 except ValueError:
-                    payload = payload_str
+                    logger.warning(f"[WS] ZMQ Payload bukan JSON valid, diabaikan: {payload_str[:50]}")
+                    continue
+                
+                if not isinstance(payload, dict):
+                    logger.warning(f"[WS] ZMQ Payload bukan dictionary, diabaikan: {payload}")
+                    continue
                 
                 # Routing event berdasarkan topic
                 if topic == "qr_result":

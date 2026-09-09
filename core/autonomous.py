@@ -62,13 +62,11 @@ LOOP_INTERVAL = 1.0 / AUTONOMOUS_LOOP_HZ  # 10Hz
 
 class MissionState:
     IDLE = "IDLE"
-    NAV_TO_WAYPOINT = "NAV_TO_WAYPOINT"
-    SEARCH = "SEARCH"
+    DIVE_AND_SEARCH = "DIVE_AND_SEARCH"
     ALIGN = "ALIGN"
     APPROACH = "APPROACH"
-    GRAB = "GRAB"
-    VERIFY_GRAB = "VERIFY_GRAB"
-    RETURN = "RETURN"
+    GRAB_FROM_WALL = "GRAB_FROM_WALL"
+    SURFACE_WITH_PAYLOAD = "SURFACE_WITH_PAYLOAD"
     COMPLETE = "COMPLETE"
     FAILSAFE = "FAILSAFE"
 
@@ -95,17 +93,19 @@ class AutonomousController:
         self._mission_thread: Optional[threading.Thread] = None
 
         self._latest_vision = None
+        self._latest_qr = None
 
     def start_mission(self, target_id: str) -> dict:
         with self._lock:
             if self._state != MissionState.IDLE:
                 return {"ok": False, "reason": "Misi sedang berjalan"}
             waypoints = self._traj.get_replay_waypoints()
-            self._state     = MissionState.NAV_TO_WAYPOINT
+            self._state     = MissionState.DIVE_AND_SEARCH
             self._target_id = target_id
             self._start_time = time.time()
             self._abort_reason = ""
             self._flush_vision_queue()
+            self._flush_qr_queue()
         
         self._mission_thread = threading.Thread(
             target=self._mission_loop,
@@ -142,7 +142,7 @@ class AutonomousController:
         with self._lock:
             return self._state != MissionState.IDLE
 
-    # --- Vision Helpers ---
+    # --- Vision & QR Helpers ---
     def _activate_vision(self):
         if self._cmd_front_q:
             try:
@@ -158,6 +158,22 @@ class AutonomousController:
                 logger.debug("Vision deactivated")
             except:
                 pass
+
+    def _activate_qr(self):
+        if self._cmd_front_q:
+            try:
+                self._cmd_front_q.put_nowait({"action": "qr_activate"})
+                logger.debug("QR activated")
+            except:
+                pass
+
+    def _deactivate_qr(self):
+        if self._cmd_front_q:
+            try:
+                self._cmd_front_q.put_nowait({"action": "qr_deactivate"})
+                logger.debug("QR deactivated")
+            except:
+                pass
                 
     def _flush_vision_queue(self):
         if not self._vision_queue: return
@@ -166,38 +182,79 @@ class AutonomousController:
                 self._vision_queue.get_nowait()
             except:
                 pass
+
+    def _flush_qr_queue(self):
+        if not self._qr_queue: return
+        while not self._qr_queue.empty():
+            try:
+                self._qr_queue.get_nowait()
+            except:
+                pass
                 
-    def _update_vision(self):
-        if not self._vision_queue: return
-        try:
-            while not self._vision_queue.empty():
-                self._latest_vision = self._vision_queue.get_nowait()
-        except:
-            pass
-            
-    def _get_payload_detection(self):
-        if not self._latest_vision: return None
-        # Age check
-        if time.time() - self._latest_vision.get("timestamp", 0) > 1.0:
-            return None # too old
+    def _update_sensors(self):
+        if self._vision_queue:
+            try:
+                while not self._vision_queue.empty():
+                    self._latest_vision = self._vision_queue.get_nowait()
+            except:
+                pass
         
-        best = None
-        for d in self._latest_vision.get("detections", []):
-            if d["class_name"] == "payload":
-                if best is None or d["confidence"] > best["confidence"]:
-                    best = d
-        return best
+        if self._qr_queue:
+            try:
+                while not self._qr_queue.empty():
+                    self._latest_qr = self._qr_queue.get_nowait()
+            except:
+                pass
+            
+    def _get_best_target(self):
+        """
+        Sensor fusion: Mengutamakan QR code. Jika QR tidak ada, fallback ke YOLO Vision.
+        Returns:
+            dict atau None: {"center": {"x": cx, "y": cy}, "width": w, "source": "qr"|"vision"}
+        """
+        # 1. Cek QR Code terlebih dahulu
+        if self._latest_qr:
+            ts = self._latest_qr.get("timestamp", 0)
+            if ts > 1e11: ts /= 1000.0  # Handle ms timestamp
+            age = time.time() - ts
+            if 0 <= age <= 1.0:
+                # qr_detector front mengembalikan offset_x dan offset_y dari center frame
+                # Kita ubah kembali menjadi koordinat absolut agar sesuai dengan format lama
+                cx = (FRAME_WIDTH / 2) + self._latest_qr.get("offset_x", 0)
+                cy = (FRAME_HEIGHT / 2) + self._latest_qr.get("offset_y", 0)
+                return {
+                    "center": {"x": cx, "y": cy},
+                    "width": self._latest_qr.get("width", 100),
+                    "source": "qr"
+                }
+        
+        # 2. Fallback ke YOLO Vision
+        if self._latest_vision:
+            ts = self._latest_vision.get("timestamp", 0)
+            if ts > 1e11: ts /= 1000.0  # Handle ms timestamp
+            age = time.time() - ts
+            if 0 <= age <= 1.0:
+                best = None
+                for d in self._latest_vision.get("detections", []):
+                    if d["class_name"] == "payload":
+                        if best is None or d["confidence"] > best["confidence"]:
+                            best = d
+                if best:
+                    bbox_width = best["bbox"]["x2"] - best["bbox"]["x1"]
+                    return {
+                        "center": best["center"],
+                        "width": bbox_width,
+                        "source": "vision"
+                    }
+        
+        return None
     
     # --- FSM ---
     def _mission_loop(self, waypoints: list):
         success = False
         try:
-            if not self._phase_nav_to_waypoint(waypoints):
-                self._finalize(False)
-                return
-            
-            self._set_state(MissionState.SEARCH)
-            if not self._phase_search():
+            self._set_state(MissionState.DIVE_AND_SEARCH)
+            if not self._phase_dive_and_search():
                 self._finalize(False)
                 return
             
@@ -211,16 +268,11 @@ class AutonomousController:
                 self._finalize(False)
                 return
             
-            self._set_state(MissionState.GRAB)
-            self._phase_grab()
+            self._set_state(MissionState.GRAB_FROM_WALL)
+            self._phase_grab_from_wall()
             
-            self._set_state(MissionState.VERIFY_GRAB)
-            if not self._phase_verify_grab():
-                self._finalize(False)
-                return
-            
-            self._set_state(MissionState.RETURN)
-            self._phase_return()
+            self._set_state(MissionState.SURFACE_WITH_PAYLOAD)
+            self._phase_surface_with_payload()
             
             success = True
         except Exception as e:
@@ -230,59 +282,31 @@ class AutonomousController:
         finally:
             self._finalize(success)
 
-    def _phase_nav_to_waypoint(self, waypoints) -> bool:
-        self._emit_event("nav", "Navigasi ke area pencarian")
-        if not waypoints: 
-            return True # Langsung search
-            
-        target_wp = waypoints[-1]
-        wp_start_time = time.time()
-        
-        while True:
-            if not self._is_safe(): return False
-            curr_pos = self._traj.get_current_pos()
-            curr_yaw = self._traj.get_current_yaw()
-            
-            dx = target_wp["x"] - curr_pos["x"]
-            dy = target_wp["y"] - curr_pos["y"]
-            dist_2d = math.sqrt(dx*dx + dy*dy)
-            
-            if dist_2d < AUTONOMOUS_WAYPOINT_REACH_THRESHOLD_M:
-                break
-            if time.time() - wp_start_time > AUTONOMOUS_WAYPOINT_TIMEOUT_S * len(waypoints):
-                break
-                
-            target_heading = math.degrees(math.atan2(dy, dx))
-            yaw_error = self._normalize_angle(target_heading - curr_yaw)
-            yaw_delta = int(_clamp(yaw_error * AUTONOMOUS_KP_YAW, -AUTONOMOUS_MAX_YAW_CORRECTION, AUTONOMOUS_MAX_YAW_CORRECTION))
-            
-            self._send_rc({
-                AUTONOMOUS_RC_CH_FORWARD: AUTONOMOUS_REPLAY_SPEED_PWM,
-                AUTONOMOUS_RC_CH_YAW: RC_NEUTRAL_PWM + yaw_delta
-            })
-            time.sleep(LOOP_INTERVAL)
-            
-        self._send_rc_neutral()
-        return True
-
-    def _phase_search(self) -> bool:
+    def _phase_dive_and_search(self) -> bool:
         self._activate_vision()
-        self._emit_event("search", "Mencari payload via AI Vision...")
+        self._activate_qr()
+        self._emit_event("search", "Menyelam dan mencari target di dinding...")
         start_time = time.time()
         
         sweep_dir = 1
         
         while time.time() - start_time < VISION_SEARCH_TIMEOUT_S:
             if not self._is_safe(): return False
-            self._update_vision()
-            target = self._get_payload_detection()
+            self._update_sensors()
+            target = self._get_best_target()
             if target:
                 self._send_rc_neutral()
-                self._emit_event("search_success", "Payload ditemukan!")
+                self._emit_event("search_success", f"Target ditemukan! (via {target['source']})")
                 return True
                 
             yaw_pwm = RC_NEUTRAL_PWM + (VISION_SEARCH_YAW_SPEED_PWM * sweep_dir)
-            self._send_rc({AUTONOMOUS_RC_CH_YAW: yaw_pwm})
+            # Tanpa depth sensor, beri throttle negatif konstan agar terus menyelam / tidak mengambang
+            dive_pwm = RC_NEUTRAL_PWM - 100
+            
+            self._send_rc({
+                AUTONOMOUS_RC_CH_YAW: yaw_pwm,
+                AUTONOMOUS_RC_CH_THROTTLE: dive_pwm
+            })
             
             # Switch direction roughly every 3 seconds for basic sweep
             if int(time.time() - start_time) % 6 > 3:
@@ -302,8 +326,8 @@ class AutonomousController:
         
         while time.time() - start_time < VISION_ALIGN_TIMEOUT_S:
             if not self._is_safe(): return False
-            self._update_vision()
-            target = self._get_payload_detection()
+            self._update_sensors()
+            target = self._get_best_target()
             
             if not target:
                 self._send_rc_neutral()
@@ -353,8 +377,8 @@ class AutonomousController:
         
         while time.time() - start_time < VISION_APPROACH_TIMEOUT_S:
             if not self._is_safe(): return False
-            self._update_vision()
-            target = self._get_payload_detection()
+            self._update_sensors()
+            target = self._get_best_target()
             
             if not target:
                 if target_lost_time is None:
@@ -368,10 +392,12 @@ class AutonomousController:
             
             target_lost_time = None
             
-            bbox_width = target["bbox"]["x2"] - target["bbox"]["x1"]
-            if bbox_width >= VISION_APPROACH_TARGET_SIZE_PX:
+            # Batas berhenti: 250px untuk YOLO, 40% dari 250px (sekitar 100px) untuk QR Code (karena fisik QR lebih kecil)
+            stop_threshold = VISION_APPROACH_TARGET_SIZE_PX if target["source"] == "vision" else (VISION_APPROACH_TARGET_SIZE_PX * 0.4)
+            
+            if target["width"] >= stop_threshold:
                 self._send_rc_neutral()
-                self._emit_event("approach_success", "Target tercapai, ukuran bbox terpenuhi")
+                self._emit_event("approach_success", f"Target tercapai (via {target['source']})")
                 return True
                 
             error_x = target["center"]["x"] - (FRAME_WIDTH / 2)
@@ -389,32 +415,45 @@ class AutonomousController:
         self._abort_reason = "Approach timeout"
         return False
 
-    def _phase_grab(self):
-        self._emit_event("grab", "Menstabilkan dan Grab payload")
+    def _phase_grab_from_wall(self):
+        self._emit_event("grab", "Membuka capit dan mengambil dari dinding")
         self._send_rc_neutral()
         time.sleep(VISION_GRAB_STABILIZE_S)
         
         self._mav.gripper("open")
         time.sleep(VISION_GRAB_OPEN_WAIT_S)
         
+        # Maju menabrak dinding secara perlahan untuk mengait payload
         self._send_rc({AUTONOMOUS_RC_CH_FORWARD: RC_NEUTRAL_PWM + int(VISION_APPROACH_SPEED_PWM*0.5)})
-        time.sleep(0.5)
+        time.sleep(1.5) # Durasi maju dilebihkan sedikit agar kaitan masuk
         self._send_rc_neutral()
         
+        # Tutup capit untuk mengamankan payload
         self._mav.gripper("close")
         time.sleep(VISION_GRAB_CLOSE_WAIT_S)
-
-    def _phase_verify_grab(self) -> bool:
-        self._emit_event("verify", "Memverifikasi pengambilan payload")
-        self._send_rc({AUTONOMOUS_RC_CH_FORWARD: RC_NEUTRAL_PWM + VISION_VERIFY_BACKOFF_SPEED_PWM})
-        time.sleep(VISION_VERIFY_BACKOFF_DURATION_S)
-        self._send_rc_neutral()
-        return True
         
-    def _phase_return(self):
-        self._emit_event("return", "Kembali ke permukaan")
-        self._send_rc({AUTONOMOUS_RC_CH_THROTTLE: RC_NEUTRAL_PWM + 200})
-        time.sleep(3.0)
+        # Mundur (backoff) untuk melepaskan payload dari gantungan dinding
+        self._emit_event("verify", "Menarik payload dari gantungan")
+        self._send_rc({AUTONOMOUS_RC_CH_FORWARD: RC_NEUTRAL_PWM - VISION_VERIFY_BACKOFF_SPEED_PWM})
+        time.sleep(VISION_VERIFY_BACKOFF_DURATION_S + 1.0)
+        self._send_rc_neutral()
+
+    def _phase_surface_with_payload(self):
+        self._emit_event("return", "Kembali ke permukaan dan bersandar (Docking)")
+        # Dorongan naik konstan (+300) selama 8 detik untuk sampai permukaan
+        # Sedikit maju (+50) untuk bersandar (docking) ke dinding
+        self._send_rc({
+            AUTONOMOUS_RC_CH_THROTTLE: RC_NEUTRAL_PWM + 300,
+            AUTONOMOUS_RC_CH_FORWARD: RC_NEUTRAL_PWM + 50
+        })
+        time.sleep(8.0)
+        
+        # Hold docking ringan
+        self._send_rc({
+            AUTONOMOUS_RC_CH_THROTTLE: RC_NEUTRAL_PWM + 50,
+            AUTONOMOUS_RC_CH_FORWARD: RC_NEUTRAL_PWM + 50
+        })
+        time.sleep(2.0)
         self._send_rc_neutral()
 
     def _is_safe(self) -> bool:
@@ -432,6 +471,7 @@ class AutonomousController:
     def _finalize(self, success: bool):
         self._send_rc_neutral()
         self._deactivate_vision()
+        self._deactivate_qr()
         self._mav.set_mode("MANUAL")
         duration = round(time.time() - self._start_time, 1) if self._start_time else 0.0
         with self._lock:

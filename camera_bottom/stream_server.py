@@ -185,13 +185,18 @@ def _capture_loop():
 
         # Jalankan deteksi QR sebelum overlay
         if _detector is not None and _processor is not None:
-            qr_data, dock_aligned, bbox = _detector.scan(
-                raw,
-                _processor
-            )
-            _processor.update_qr_data(qr_data)
-            _processor.update_dock_status(dock_aligned)
-            _processor.update_bbox(bbox)
+            if getattr(_detector, 'is_active', False):
+                qr_data, dock_aligned, bbox = _detector.scan(
+                    raw,
+                    _processor
+                )
+                _processor.update_qr_data(qr_data)
+                _processor.update_dock_status(dock_aligned)
+                _processor.update_bbox(bbox)
+            else:
+                _processor.update_qr_data(None)
+                _processor.update_dock_status(False)
+                _processor.update_bbox(None)
 
         # Frame dengan HUD untuk stream
         display = _processor.process(frame)
@@ -231,6 +236,14 @@ def _zmq_command_loop():
             elif action == "record_stop":
                 filepath = _recorder.stop()
                 _send_result(action, filepath)
+
+            elif action == "qr_activate":
+                if _detector is not None:
+                    _detector.activate()
+
+            elif action == "qr_deactivate":
+                if _detector is not None:
+                    _detector.deactivate()
 
             else:
                 logger.warning(f"[BottomStream] Unknown command: {action}")
