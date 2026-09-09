@@ -55,7 +55,6 @@ class FrontCamera:
         logger.info(f"[FrontCamera] Membuka kamera index={self.index} via GStreamer")
         gst_pipeline = (
             f"v4l2src device=/dev/video{self.index} ! "
-            f"decodebin ! "
             f"videoconvert ! "
             f"videoscale ! video/x-raw, width={FRAME_WIDTH}, height={FRAME_HEIGHT} ! "
             f"videorate ! video/x-raw, framerate={FRAME_FPS}/1 ! "

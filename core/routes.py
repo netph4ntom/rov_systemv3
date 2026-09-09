@@ -427,10 +427,10 @@ def create_app(
         frontend_channels = {int(k): int(v) for k, v in data.get("channels", {}).items()}
         logger.debug(f"[Routes] cmd_rc_override (frontend): {frontend_channels}")
         
-        # Map frontend channel keys (CH6=Lateral, CH5=Forward, CH3=Throttle, CH4=Yaw) sesuai ArduSub
+        # Map frontend channel keys (1=Lateral, 2=Forward, 3=Throttle, 4=Yaw)
         # and scale to MANUAL_CONTROL ranges (Surge/Sway/Yaw: -1000 to 1000, Throttle: 0 to 1000)
-        ch_lat = frontend_channels.get(6, RC_NEUTRAL_PWM)
-        ch_fwd = frontend_channels.get(5, RC_NEUTRAL_PWM)
+        ch_lat = frontend_channels.get(1, RC_NEUTRAL_PWM)
+        ch_fwd = frontend_channels.get(2, RC_NEUTRAL_PWM)
         ch_thr = frontend_channels.get(3, RC_NEUTRAL_PWM)
         ch_yaw = frontend_channels.get(4, RC_NEUTRAL_PWM)
 
@@ -448,11 +448,11 @@ def create_app(
         if _mav:
             _mav.manual_control(x, y, z, r)
         if _traj:
-            ch_lat_val = frontend_channels.get(6, RC_NEUTRAL_PWM)
-            ch_fwd_val = frontend_channels.get(5, RC_NEUTRAL_PWM)
+            ch1 = frontend_channels.get(1, RC_NEUTRAL_PWM)
+            ch2 = frontend_channels.get(2, RC_NEUTRAL_PWM)
             _traj.update_velocity(
-                ((ch_lat_val - RC_NEUTRAL_PWM) / 500.0) * JOYSTICK_SCALE_MS,
-                ((ch_fwd_val - RC_NEUTRAL_PWM) / 500.0) * JOYSTICK_SCALE_MS,
+                ((ch1 - RC_NEUTRAL_PWM) / 500.0) * JOYSTICK_SCALE_MS,
+                ((ch2 - RC_NEUTRAL_PWM) / 500.0) * JOYSTICK_SCALE_MS,
             )
 
     @sio.on("cmd_emergency_stop")

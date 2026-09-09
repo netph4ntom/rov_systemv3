@@ -26,3 +26,6 @@ storage/recordings/
 # OS
 .DS_Store
 Thumbs.db
+
+# backup
+rov_systemv3-main
