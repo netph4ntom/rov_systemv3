@@ -405,6 +405,8 @@ class FailsafeWatchdog:
                     Sub.SYSTEM:     "log_resources",
                 }.get(name, "notify_only")
             else:
+                if name in (Sub.CAM_FRONT, Sub.CAM_BOTTOM):
+                    return "log_camera_only"
                 return "escalate_critical"
 
         if severity == Severity.CRITICAL:
@@ -425,7 +427,7 @@ class FailsafeWatchdog:
                 name="MAVReconnect"
             ).start()
 
-        elif action in ("log_camera_front", "log_camera_bottom"):
+        elif action in ("log_camera_front", "log_camera_bottom", "log_camera_only"):
             logger.warning(f"[Failsafe] Kamera {name} fault (attempt #{attempts}) - perlu cek manual")
 
         elif action == "log_resources":
