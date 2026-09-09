@@ -200,6 +200,16 @@ def create_app(
 
     # Register handlers
     def _on_qr_front_result(payload):
+        # Simpan ke QR history (sama seperti kamera bawah)
+        _store_qr_from_queue({**payload, "source": "front"})
+
+        # Emit ke frontend via Socket.IO
+        if _loop is not None:
+            asyncio.run_coroutine_threadsafe(
+                sio.emit("qr_result", {**payload, "source": "front"}),
+                _loop
+            )
+
         # Forward to autonomous controller queue
         if autonomous and autonomous.is_active and hasattr(autonomous, "_qr_queue") and autonomous._qr_queue is not None:
             try:

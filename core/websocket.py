@@ -86,13 +86,14 @@ async def _zmq_listener_loop(bottom_pub_port: int, front_pub_port: int):
                 
                 # Routing event berdasarkan topic
                 if topic == "qr_result":
-                    logger.debug(f"[WS] ZMQ QR: {payload.get('data', '')}")
+                    logger.debug(f"[WS] ZMQ QR (bottom): {payload.get('data', '')}")
+                    payload_bottom = {**payload, "source": "bottom"}
                     if _qr_store_callback:
                         try:
-                            _qr_store_callback(payload)
+                            _qr_store_callback(payload_bottom)
                         except Exception as e:
                             logger.warning(f"[WS] QR store error: {e}")
-                    await sio.emit("qr_detected", payload)
+                    await sio.emit("qr_detected", payload_bottom)
 
                 elif topic == "dock_event":
                     event_name = payload.get("type", "dock_event")
@@ -104,6 +105,9 @@ async def _zmq_listener_loop(bottom_pub_port: int, front_pub_port: int):
                     await sio.emit("camera_result", payload)
 
                 elif topic == "qr_front_result":
+                    logger.debug(f"[WS] ZMQ QR (front): {payload.get('data', '')}")
+                    # Emit ke frontend sebagai qr_detected agar masuk history
+                    await sio.emit("qr_detected", {**payload, "source": "front"})
                     # Teruskan hasil QR kamera depan ke controller otonom
                     if _qr_front_callback:
                         try:
