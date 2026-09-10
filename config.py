@@ -197,7 +197,7 @@ AUTONOMOUS_WAYPOINT_SUBSAMPLE         = 3     # ambil setiap waypoint ke-3
 # ================================================================
 
 # Detector Configuration
-VISION_MODEL_PATH = "models/rov_best.pt"
+VISION_MODEL_PATH = "models/best.onnx"
 VISION_CONFIDENCE_THRESHOLD = 0.50
 VISION_DETECTION_MAX_AGE_MS = 1000  # ms max age for detection to be considered valid
 VISION_TARGET_ACQUISITION_FRAMES = 3 # consecutive detections required to lock on
