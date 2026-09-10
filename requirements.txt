@@ -32,5 +32,5 @@ aiortc>=1.6.0               # WebRTC streaming
 psutil>=5.9.0
 
 # ── Autonomous Vision ───────────────────────────────────────
-# YOLO object detection kini menggunakan modul DNN dari OpenCV secara native.
-# ultralytics tidak lagi diperlukan sehingga menghemat ~1.5GB dependensi.
+# Menggunakan ONNXRuntime karena OpenCV DNN (4.6) gagal memproses layer 'Split' / Attention YOLOv8.
+onnxruntime>=1.15.0         # Engine ML untuk YOLO (jauh lebih ringan dari ultralytics/PyTorch)

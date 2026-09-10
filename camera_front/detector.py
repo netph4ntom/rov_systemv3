@@ -35,16 +35,29 @@ class Detector:
 
 import cv2
 import numpy as np
+import time
+import logging
+
+logger = logging.getLogger(__name__)
 
 class YOLODetector(Detector):
     """
-    Detector menggunakan model YOLO format ONNX via OpenCV DNN.
-    Sangat ringan untuk Raspberry Pi karena tidak butuh PyTorch/Ultralytics.
+    Detector menggunakan model YOLO format ONNX via ONNXRuntime.
+    Lebih ringan dari PyTorch namun 100% kompatibel dengan semua versi YOLO (termasuk layer Attention/Split).
     """
     def __init__(self):
-        self.net = None
+        self.session = None
+        self.input_name = None
+        self.output_name = None
         self.is_loaded = False
         
+        try:
+            import onnxruntime as ort
+            self._ort = ort
+        except ImportError:
+            logger.error("[ONNXDetector] onnxruntime package not found. Please run: pip install onnxruntime")
+            self._ort = None
+
         from config import VISION_CONFIDENCE_THRESHOLD
         # Default input size untuk YOLOv8 (640x640)
         self.input_width = 640
@@ -53,7 +66,6 @@ class YOLODetector(Detector):
         self.iou_threshold = 0.4
         
         # Pemetaan nama class (sesuaikan dengan urutan saat training YOLO)
-        # Sistem autonomous (autonomous.py) mencari class bernama "payload"
         self.classes = {
             0: "payload",
             1: "dock",
@@ -62,15 +74,18 @@ class YOLODetector(Detector):
         } 
 
     def load_model(self, model_path: str) -> bool:
+        if self._ort is None:
+            return False
+            
         if not model_path.endswith(".onnx"):
             logger.warning("[ONNXDetector] Model bukan berakhiran .onnx. Harap pastikan model sudah di-export ke ONNX.")
             
         try:
-            logger.info(f"[ONNXDetector] Loading ONNX model from {model_path} via OpenCV DNN...")
-            self.net = cv2.dnn.readNetFromONNX(model_path)
-            # Opsional: Gunakan CPU atau jika ada backend lain (seperti OpenVINO/CUDA)
-            self.net.setPreferableBackend(cv2.dnn.DNN_BACKEND_OPENCV)
-            self.net.setPreferableTarget(cv2.dnn.DNN_TARGET_CPU)
+            logger.info(f"[ONNXDetector] Loading ONNX model from {model_path} via ONNXRuntime...")
+            # Gunakan CPUExecutionProvider untuk kompatibilitas maksimal di Raspberry Pi
+            self.session = self._ort.InferenceSession(model_path, providers=['CPUExecutionProvider'])
+            self.input_name = self.session.get_inputs()[0].name
+            self.output_name = self.session.get_outputs()[0].name
             
             self.is_loaded = True
             logger.info("[ONNXDetector] Model ONNX loaded successfully.")
@@ -81,7 +96,7 @@ class YOLODetector(Detector):
             return False
 
     def detect(self, frame) -> List[DetectionResult]:
-        if not self.is_loaded or self.net is None or frame is None:
+        if not self.is_loaded or self.session is None or frame is None:
             return []
 
         try:
@@ -90,10 +105,9 @@ class YOLODetector(Detector):
             
             # Prepare image for DNN (YOLOv8 expects RGB, 1/255.0 normalization, 640x640)
             blob = cv2.dnn.blobFromImage(original_image, 1/255.0, (self.input_width, self.input_height), swapRB=True, crop=False)
-            self.net.setInput(blob)
             
-            # Run forward pass
-            outputs = self.net.forward()
+            # Run forward pass via ONNXRuntime
+            outputs = self.session.run([self.output_name], {self.input_name: blob})[0]
             
             # YOLOv8 ONNX output shape is (1, num_classes + 4, 8400)
             # Transpose to (8400, num_classes + 4) for easier processing
