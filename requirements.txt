@@ -1,6 +1,3 @@
-# requirements.txt — Project ROV Vision
-# Install: pip install -r requirements.txt
-
 # ── Computer Vision (Gunakan versi sistem apt di Raspberry Pi 5) ──
 # Di Raspberry Pi 5, gunakan: sudo apt install python3-opencv python3-numpy python3-gi
 # Dan aktifkan `include-system-site-packages = true` di `.venv/pyvenv.cfg`

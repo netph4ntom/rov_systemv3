@@ -104,7 +104,7 @@ ZMQ_PORT_FRONT_CMD  = 5558  # Core pushes commands to front camera
 # ──────────────────────────────────────────────
 SERVO_GRIPPER_CHANNEL   = 9          # AUX channel untuk servo gripper
 SERVO_GRIPPER_OPEN_PWM  = 1900       # PWM saat gripper terbuka
-SERVO_GRIPPER_CLOSE_PWM = 1100       # PWM saat gripper tertutup
+SERVO_GRIPPER_CLOSE_PWM = 1400       # PWM saat gripper tertutup
 SERVO_LIGHT_CHANNEL = 10             # AUX channel untuk servo lampu
 SERVO_LIGHT_ON_PWM = 1900            # PWM saat lampu menyala penuh
 SERVO_LIGHT_OFF_PWM = 1100           # PWM saat lampu mati
